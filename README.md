@@ -32,6 +32,8 @@ This system is designed to evaluate AI agent trajectories that utilize multiple 
 - **Multiple LLM Providers**: Supports OpenAI, Google Gemini, and Anthropic Claude
 - **Embedded Results**: Evaluations are embedded directly into agent responses
 - **Robust Error Handling**: Proper error reporting without mock data generation
+- **File Splitting**: Automatically split large datasets into manageable chunks
+- **Batch Processing**: Evaluate multiple JSONL files in a single operation
 
 ### Supported Tool Types
 
@@ -52,6 +54,19 @@ Raw Agent Data → Preprocessing → Clean Data → Evaluation → Evaluated Res
  demo01.jsonl → preprocess_agent → preprocessed → step_level → final_results
                     _data.py        _data.jsonl   _evaluator     .jsonl
                                                     .py
+```
+
+### 2.1 Enhanced Workflow with File Splitting and Batch Processing
+
+```
+Large Dataset → Preprocessing → Split Files → Batch Evaluation → Aggregated Results
+     ↓               ↓              ↓              ↓                ↓
+demo02.jsonl → preprocess_agent → predemo02/ → run_evaluation → multiple_eva.jsonl
+  (97 tasks)      _data.py        ├─demo0201.jsonl  --batch-folder   ├─demo0201_eva.jsonl
+                 --split-size 10  ├─demo0202.jsonl                   ├─demo0202_eva.jsonl
+                                  ├─...                               ├─...
+                                  └─demo0210.jsonl                   └─demo0210_eva.jsonl
+                                    (7 tasks)                         (evaluated)
 ```
 
 ### Core Components
@@ -149,7 +164,41 @@ For each sample in the dataset:
 - Generate preprocessing statistics
 - Log processing summary
 
-### 3.3 Preprocessing Operation Instructions
+### 3.3 File Splitting Feature
+
+#### 3.3.1 Purpose and Usage
+The preprocessing system now supports splitting large JSONL files into smaller chunks for easier processing and evaluation. This is particularly useful when:
+- Processing large datasets that exceed memory limits
+- Distributing evaluation tasks across multiple sessions
+- Managing computational resources more efficiently
+
+#### 3.3.2 Splitting Logic
+```python
+# Example: demo02.jsonl with 97 tasks, split_size=10
+# Results in: predemo02/demo0201.jsonl, predemo02/demo0202.jsonl, ..., predemo02/demo0210.jsonl
+# Last file (demo0210.jsonl) contains 7 tasks (97 % 10 = 7)
+
+num_files = math.ceil(len(processed_data) / split_size)
+for i in range(num_files):
+    start_idx = i * split_size
+    end_idx = min((i + 1) * split_size, len(processed_data))
+    chunk = processed_data[start_idx:end_idx]
+    output_filename = f"{base_name}{i+1:02d}.jsonl"
+```
+
+#### 3.3.3 Directory Structure
+```
+data/
+├── demo02.jsonl                 # Original file (97 tasks)
+├── demo02_preprocessed.jsonl    # Main preprocessed file
+└── predemo02/                   # Split files directory
+    ├── demo0201.jsonl          # Tasks 1-10
+    ├── demo0202.jsonl          # Tasks 11-20
+    ├── ...
+    └── demo0210.jsonl          # Tasks 91-97 (7 tasks)
+```
+
+### 3.4 Preprocessing Operation Instructions
 
 #### Command Syntax
 ```bash
@@ -159,6 +208,13 @@ python src/run_evaluation.py \
     --output <output_file> \
     [--beta-threshold <number>] \
     [--verbose]
+
+# For standalone preprocessing with splitting
+python src/preprocess_agent_data.py \
+    --input <input_file> \
+    --output <output_file> \
+    --split-size <number> \
+    [--beta-threshold <number>]
 ```
 
 #### Examples
@@ -176,6 +232,20 @@ python src/run_evaluation.py \
     --output data/clean_data.jsonl \
     --beta-threshold 20 \
     --verbose
+
+# Preprocessing with file splitting
+python src/preprocess_agent_data.py \
+    --input data/demo02.jsonl \
+    --output data/demo02_preprocessed.jsonl \
+    --split-size 10 \
+    --beta-threshold 15
+
+# Batch evaluation of split files
+python src/run_evaluation.py \
+    --input data/predemo02/ \
+    --provider openai \
+    --api-key YOUR_KEY \
+    --batch-folder
 ```
 
 #### Output Statistics
@@ -693,6 +763,34 @@ python src/run_evaluation.py \
     --output data/gemini_results.jsonl
 ```
 
+### 6.4 Batch Folder Evaluation
+```bash
+# Evaluate all JSONL files in a folder
+python src/run_evaluation.py \
+    --input data/predemo02/ \
+    --provider openai \
+    --api-key YOUR_KEY \
+    --batch-folder \
+    --output data/batch_results.jsonl
+
+# Batch evaluation with custom settings
+python src/run_evaluation.py \
+    --input data/split_files/ \
+    --provider anthropic \
+    --model claude-3-5-sonnet-20241022 \
+    --batch-folder \
+    --batch-size 2 \
+    --rate-limit 1.5 \
+    --full-pipeline
+
+# Batch preprocessing with file splitting
+python src/preprocess_agent_data.py \
+    --input data/large_dataset.jsonl \
+    --split-size 20 \
+    --beta-threshold 12 \
+    --output data/large_dataset_preprocessed.jsonl
+```
+
 ## 7. Configuration Options
 
 ### 7.1 Command Line Arguments
@@ -703,6 +801,7 @@ python src/run_evaluation.py \
 | `--output` | Output file path | `data/demo01_eva.jsonl` | No |
 | `--preprocess-only` | Run preprocessing only | False | No |
 | `--full-pipeline` | Run preprocessing + evaluation | False | No |
+| `--batch-folder` | Process all JSONL files in input folder | False | No |
 | `--provider` | LLM provider (openai/google/anthropic) | `openai` | No* |
 | `--api-key` | API key for LLM provider | - | No* |
 | `--model` | Specific model name | Provider default | No |
@@ -729,6 +828,7 @@ python src/run_evaluation.py \
 | **Preprocessing Only** | `--preprocess-only` | Clean and validate raw data |
 | **Evaluation Only** | Default (no flags) | Evaluate preprocessed data |
 | **Full Pipeline** | `--full-pipeline` | End-to-end processing |
+| **Batch Folder** | `--batch-folder` | Process multiple JSONL files in directory |
 
 ## 8. Output Format
 

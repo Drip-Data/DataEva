@@ -51,7 +51,9 @@ class EvaluationService:
                  batch_size: int = 3,
                  rate_limit_delay: float = 1.0,
                  preprocess_only: bool = False,
-                 full_pipeline: bool = False):
+                 full_pipeline: bool = False,
+                 beta_threshold: int = 15,
+                 split_size: int = 0):
         
         self.provider = provider
         self.api_key = api_key
@@ -60,9 +62,11 @@ class EvaluationService:
         self.rate_limit_delay = rate_limit_delay
         self.preprocess_only = preprocess_only
         self.full_pipeline = full_pipeline
+        self.beta_threshold = beta_threshold
+        self.split_size = split_size
         
         # Initialize preprocessor
-        self.preprocessor = AgentDataPreprocessor(beta_threshold=15)
+        self.preprocessor = AgentDataPreprocessor(beta_threshold=beta_threshold, split_size=split_size)
         
         # Initialize evaluator only if not preprocessing-only mode
         if not preprocess_only:

@@ -5,6 +5,8 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import ParseError
+from pathlib import Path
+import math
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,16 +21,19 @@ class AgentDataPreprocessor:
     1. Tool-call Frequency Control: Remove samples with excessive tool calls
     2. Duplicate Tool-call Removal: Eliminate redundant tool calls
     3. Format Normalization: Standardize XML tag formats and ensure proper pairing
+    4. File Splitting: Split large JSONL files into smaller chunks (optional)
     """
     
-    def __init__(self, beta_threshold: int = 15):
+    def __init__(self, beta_threshold: int = 15, split_size: int = 0):
         """
         Initialize the preprocessor.
         
         Args:
             beta_threshold: Maximum allowed tool calls before sample removal (default: 15)
+            split_size: Number of samples per split file (0 = no splitting, default: 0)
         """
         self.beta_threshold = beta_threshold
+        self.split_size = split_size
         
         # Define the four MCP servers and their XML tags
         self.mcp_servers = {
@@ -58,7 +63,8 @@ class AgentDataPreprocessor:
             'removed_frequency': 0,
             'removed_duplicates': 0,
             'format_issues_fixed': 0,
-            'valid_samples': 0
+            'valid_samples': 0,
+            'split_files_created': 0
         }
     
     def load_jsonl(self, file_path: str) -> List[Dict]:
@@ -295,6 +301,59 @@ class AgentDataPreprocessor:
         logger.info(f"Preprocessing completed. {len(valid_samples)} valid samples remaining.")
         return valid_samples
     
+    def split_data_into_files(self, processed_data: List[Dict], input_file_path: str) -> List[str]:
+        """
+        Split processed data into multiple JSONL files.
+        
+        Args:
+            processed_data: List of preprocessed samples
+            input_file_path: Original input file path for naming convention
+            
+        Returns:
+            List of output file paths created
+        """
+        if self.split_size <= 0 or len(processed_data) <= self.split_size:
+            logger.info("No splitting required (split_size=0 or data size <= split_size)")
+            return []
+        
+        # Create output directory
+        input_path = Path(input_file_path)
+        base_name = input_path.stem  # e.g., "demo02" from "demo02.jsonl"
+        output_dir = input_path.parent / f"pre{base_name}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Calculate number of files needed
+        num_files = math.ceil(len(processed_data) / self.split_size)
+        output_files = []
+        
+        logger.info(f"Splitting {len(processed_data)} samples into {num_files} files of {self.split_size} samples each")
+        
+        for i in range(num_files):
+            start_idx = i * self.split_size
+            end_idx = min((i + 1) * self.split_size, len(processed_data))
+            chunk = processed_data[start_idx:end_idx]
+            
+            # Create output filename: xxxx01.jsonl, xxxx02.jsonl, etc.
+            output_filename = f"{base_name}{i+1:02d}.jsonl"
+            output_path = output_dir / output_filename
+            
+            # Save chunk to file
+            try:
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    for sample in chunk:
+                        f.write(json.dumps(sample, ensure_ascii=False) + '\n')
+                
+                output_files.append(str(output_path))
+                self.stats['split_files_created'] += 1
+                logger.info(f"Created {output_filename} with {len(chunk)} samples")
+                
+            except Exception as e:
+                logger.error(f"Error saving split file {output_path}: {e}")
+                continue
+        
+        logger.info(f"Successfully created {len(output_files)} split files in {output_dir}")
+        return output_files
+    
     def save_preprocessed_data(self, processed_data: List[Dict], output_path: str):
         """
         Save preprocessed data to JSONL file.
@@ -335,6 +394,7 @@ class AgentDataPreprocessor:
         print(f"Removed (frequency): {self.stats['removed_frequency']}")
         print(f"Removed (duplicates): {self.stats['removed_duplicates']}")
         print(f"Format issues fixed: {self.stats['format_issues_fixed']}")
+        print(f"Split files created: {self.stats['split_files_created']}")
         print(f"Success rate: {self.stats['valid_samples']/self.stats['total_samples']*100:.2f}%")
         print("="*50)
 
@@ -342,12 +402,31 @@ class AgentDataPreprocessor:
 def main():
     """Main function to run the preprocessing pipeline."""
     
+    import argparse
+    
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Preprocess AI agent trajectory data')
+    parser.add_argument('--input', '-i', type=str, default="data/demo01.jsonl",
+                       help='Input JSONL file path')
+    parser.add_argument('--output', '-o', type=str, default="data/demo01_preprocessed.jsonl",
+                       help='Output JSONL file path')
+    parser.add_argument('--beta-threshold', type=int, default=15,
+                       help='Maximum tool calls per sample (default: 15)')
+    parser.add_argument('--split-size', type=int, default=0,
+                       help='Number of samples per split file (0 = no splitting)')
+    parser.add_argument('--stats', type=str, default="data/preprocessing_stats.json",
+                       help='Statistics output file path')
+    
+    args = parser.parse_args()
+    
     # Initialize preprocessor
-    preprocessor = AgentDataPreprocessor(beta_threshold=15)
+    preprocessor = AgentDataPreprocessor(
+        beta_threshold=args.beta_threshold,
+        split_size=args.split_size
+    )
     
     # Load data
-    input_file = "data/demo01.jsonl"
-    data = preprocessor.load_jsonl(input_file)
+    data = preprocessor.load_jsonl(args.input)
     
     if not data:
         logger.error("No data loaded. Exiting.")
@@ -356,12 +435,19 @@ def main():
     # Preprocess data
     processed_data = preprocessor.preprocess_data(data)
     
-    # Save results
-    output_file = "data/demo01_preprocessed.jsonl"
-    stats_file = "data/preprocessing_stats.json"
+    # Save main preprocessed file
+    preprocessor.save_preprocessed_data(processed_data, args.output)
     
-    preprocessor.save_preprocessed_data(processed_data, output_file)
-    preprocessor.save_statistics(stats_file)
+    # Split data if requested
+    if args.split_size > 0:
+        split_files = preprocessor.split_data_into_files(processed_data, args.input)
+        if split_files:
+            logger.info(f"Created {len(split_files)} split files:")
+            for file_path in split_files:
+                logger.info(f"  - {file_path}")
+    
+    # Save statistics
+    preprocessor.save_statistics(args.stats)
     
     # Print statistics
     preprocessor.print_statistics()
