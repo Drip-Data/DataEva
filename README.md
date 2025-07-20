@@ -8,10 +8,12 @@ A comprehensive evaluation system for AI agent trajectory data with integrated t
 2. [System Architecture](#2-system-architecture)
 3. [Data Preprocessing Process](#3-data-preprocessing-process)
 4. [Step-Level Evaluation Process](#4-step-level-evaluation-process)
-5. [Installation and Setup](#5-installation-and-setup)
-6. [Usage Examples](#6-usage-examples)
-7. [Configuration Options](#7-configuration-options)
-8. [Output Format](#8-output-format)
+5. [Multi-Model Evaluation System](#5-multi-model-evaluation-system)
+6. [Installation and Setup](#6-installation-and-setup)
+7. [Usage Examples](#7-usage-examples)
+8. [Configuration Options](#8-configuration-options)
+9. [Testing and Verification](#9-testing-and-verification)
+10. [Output Format](#10-output-format)
 
 ## 1. Project Overview
 
@@ -29,7 +31,10 @@ This system is designed to evaluate AI agent trajectories that utilize multiple 
 - **Modular Architecture**: Separate preprocessing and evaluation phases
 - **Multi-Tool Support**: Handles 4 MCP servers (microsandbox, deepsearch, browser_use, search_tool)
 - **Context-Aware Evaluation**: Maintains context chain between clip evaluations
-- **Multiple LLM Providers**: Supports OpenAI, Google Gemini, and Anthropic Claude
+- **Multiple LLM Providers**: Supports OpenAI, Google Gemini, Anthropic Claude, DeepSeek, Kimi, and Vertex AI
+- **Multi-Model Evaluation**: Use multiple LLMs simultaneously to reduce bias and hallucinations
+- **Score Averaging**: Automatically average scores across multiple models for robust evaluation
+- **Individual Model Tracking**: Save detailed results from each model for analysis
 - **Embedded Results**: Evaluations are embedded directly into agent responses
 - **Robust Error Handling**: Proper error reporting without mock data generation
 - **File Splitting**: Automatically split large datasets into manageable chunks
@@ -675,14 +680,257 @@ def _calculate_overall_metrics(self, clip_evaluations: List[ClipEvaluation]) -> 
     }
 ```
 
-## 5. Installation and Setup
+## 5. Multi-Model Evaluation System
 
-### 5.1 Prerequisites
+### 5.1 Overview and Benefits
+
+The multi-model evaluation system represents a major advancement in reducing evaluation bias and improving accuracy by leveraging multiple LLM providers simultaneously. Instead of relying on a single model's judgment, the system evaluates each clip using multiple models and averages their scores to provide more robust and reliable evaluations.
+
+#### 5.1.1 Key Advantages
+
+- **Reduced Bias**: Different models have different training data and biases; averaging reduces individual model limitations
+- **Higher Accuracy**: Multiple perspectives provide more balanced evaluations
+- **Hallucination Mitigation**: Inconsistent hallucinations from individual models are filtered out through averaging
+- **Provider Redundancy**: If one API fails, evaluation can continue with remaining models
+- **Comprehensive Analysis**: Individual model results are saved for detailed analysis
+
+### 5.2 Supported LLM Providers
+
+The system now supports **6 major LLM providers** with their respective models:
+
+| Provider | Default Model | Alternative Models | API Type |
+|----------|---------------|-------------------|----------|
+| **OpenAI** | `gpt-4o` | `gpt-4o-mini`, `gpt-4-turbo` | OpenAI API |
+| **Google** | `gemini-1.5-pro` | `gemini-1.5-flash`, `gemini-1.0-pro` | Google AI API |
+| **Anthropic** | `claude-3-5-sonnet-20241022` | `claude-3-haiku-20240307`, `claude-3-opus-20240229` | Anthropic API |
+| **DeepSeek** | `deepseek-chat` | `deepseek-coder` | Custom REST API |
+| **Kimi** | `moonshot-v1-8k` | `moonshot-v1-32k` | Custom REST API |
+| **Vertex AI** | `gemini-1.5-pro` | `claude-3-5-sonnet@20241022`, Various Model Garden models | Google Cloud API |
+
+#### 5.2.1 Vertex AI Platform Support
+
+Vertex AI provides a unified platform to access multiple model types:
+- **Gemini models**: Direct access to Google's latest models
+- **Claude models**: Anthropic models through Vertex AI
+- **Open-source models**: Access to models like Qwen, DeepSeek through Model Garden
+- **Custom endpoints**: Support for deployed custom models
+
+### 5.3 Multi-Model Evaluation Process
+
+#### 5.3.1 Evaluation Workflow
+
+```mermaid
+graph TD
+    A[Input Trajectory] --> B[Clip Extraction]
+    B --> C[Model 1 Evaluation]
+    B --> D[Model 2 Evaluation]
+    B --> E[Model N Evaluation]
+    C --> F[Individual Results Storage]
+    D --> F
+    E --> F
+    C --> G[Score Averaging]
+    D --> G
+    E --> G
+    G --> H[Final Averaged Scores]
+    F --> I[Individual Model Files]
+    H --> J[Final Results File]
+```
+
+#### 5.3.2 Parallel Processing
+
+The system evaluates each clip with all configured models **simultaneously** using asyncio:
+
+```python
+# Evaluate with all models in parallel
+tasks = []
+for client in self.llm_clients:
+    task = asyncio.create_task(client.evaluate_clip(prompt, max_tokens))
+    tasks.append(task)
+
+# Wait for all evaluations to complete
+evaluations = await asyncio.gather(*tasks, return_exceptions=True)
+```
+
+#### 5.3.3 Score Averaging Algorithm
+
+For each evaluation metric, scores are averaged across all successful evaluations:
+
+```python
+def _average_scores(self, score_lists: List[Dict[str, float]]) -> Dict[str, float]:
+    averaged = {}
+    for key in all_score_keys:
+        values = [scores.get(key, 0.0) for scores in score_lists if key in scores]
+        if values:
+            averaged[key] = statistics.mean(values)
+    return averaged
+```
+
+### 5.4 Configuration and Usage
+
+#### 5.4.1 Interactive Configuration
+
+When using multi-model evaluation, the system provides an interactive configuration interface:
+
+```bash
+python run_evaluation.py --input data/demo01.jsonl --multi-model --full-pipeline
+```
+
+The system will prompt for:
+1. **Provider selection** (openai/google/anthropic/deepseek/kimi/vertex_ai)
+2. **API key** for each provider
+3. **Model name** (with intelligent defaults)
+4. **Additional configuration** (endpoints, project IDs)
+
+#### 5.4.2 Configuration Example
+
+```
+MULTI-MODEL EVALUATION CONFIGURATION
+====================================
+Configure multiple LLM models for evaluation.
+Supported providers: openai, google, anthropic, deepseek, kimi, vertex_ai
+
+Configuring Model #1
+--------------------
+Provider: openai
+API key: sk-...
+Model name (default: gpt-4o): gpt-4o
+
+Configuring Model #2
+--------------------
+Provider: google
+API key: AIza...
+Model name (default: gemini-1.5-pro): 
+
+✓ Multi-model configuration completed with 2 models:
+  1. openai: gpt-4o
+  2. google: gemini-1.5-pro
+```
+
+### 5.5 Output Structure
+
+#### 5.5.1 Individual Model Files
+
+For each model, the system generates detailed result files:
+
+**File Pattern**: `{provider}_{model_name}_{task_id}_eva.json`
+
+```json
+{
+    "task_id": "demo01_001",
+    "model_name": "openai_gpt-4o",
+    "total_clips": 3,
+    "evaluations": [
+        {
+            "clip_index": 0,
+            "tool_type": "microsandbox",
+            "clip_content": "...",
+            "evaluation_input": {
+                "prompt_length": 1250,
+                "tool_type": "microsandbox",
+                "has_tool_call": true
+            },
+            "evaluation_output": {
+                "success": true,
+                "scores": {
+                    "code_correctness": 0.85,
+                    "computational_efficiency": 0.70,
+                    "error_handling": 0.60,
+                    "result_interpretation": 0.90
+                },
+                "summary": "Well-implemented sorting algorithm",
+                "reasoning": "The code demonstrates good understanding...",
+                "model_name": "gpt-4o",
+                "provider": "openai",
+                "raw_response": "{\"scores\": {...}}",
+                "error_message": null
+            }
+        }
+    ]
+}
+```
+
+#### 5.5.2 Final Results File
+
+The main results file contains only the **averaged scores** and essential data:
+
+```json
+{
+    "task_id": "demo01_001",
+    "task_description": "Implement a sorting algorithm",
+    "full_response_with_evaluation": "Response with embedded averaged evaluations...",
+    "evaluation_metadata": {
+        "num_clips": 3,
+        "num_models": 2,
+        "model_names": ["openai_gpt-4o", "google_gemini-1.5-pro"],
+        "successful_evaluations": 3,
+        "success_rate": 1.0,
+        "overall_trajectory_score": 0.762,
+        "tool_averages": {
+            "microsandbox": {
+                "average_scores": {
+                    "code_correctness": 0.825,
+                    "computational_efficiency": 0.750,
+                    "error_handling": 0.675,
+                    "result_interpretation": 0.875
+                },
+                "clip_count": 1,
+                "overall_average": 0.781
+            }
+        }
+    }
+}
+```
+
+#### 5.5.3 Embedded Evaluations
+
+In the full response, averaged evaluations are embedded after each clip:
+
+```xml
+<microsandbox>
+def bubble_sort(arr): ...
+</microsandbox>
+
+<clip_evaluation>
+<scores>
+{
+  "code_correctness": 0.825,
+  "computational_efficiency": 0.750,
+  "error_handling": 0.675,
+  "result_interpretation": 0.875
+}
+</scores>
+<summary>Combined evaluation: Well-implemented algorithm | Good implementation with room for optimization</summary>
+<reasoning>Combined evaluation: Clear code structure and logic | Effective solution with standard approach</reasoning>
+<model_info>Averaged from 2 models</model_info>
+</clip_evaluation>
+```
+
+### 5.6 Implementation Summary
+
+The multi-model evaluation system addresses the key requirements specified:
+
+1. ✅ **Multiple LLM Providers**: Added support for 6 providers (OpenAI, Google, Anthropic, DeepSeek, Kimi, Vertex AI)
+2. ✅ **Interactive Configuration**: Terminal prompts for provider selection, API keys, and model configuration
+3. ✅ **Sequential Multi-Model Evaluation**: Each clip evaluated by all models in parallel, then scores averaged
+4. ✅ **Individual Model Tracking**: Separate JSON files saved for each model's detailed results
+5. ✅ **Averaged Final Results**: Main output file contains only averaged scores and essential data
+6. ✅ **Reduced Bias and Hallucinations**: Multiple model perspectives provide more robust evaluations
+
+**Key Technical Achievements**:
+- **Parallel Processing**: All models evaluate clips simultaneously using asyncio
+- **Error Resilience**: System continues if individual models fail
+- **Comprehensive Logging**: Detailed tracking of all API calls and results
+- **Flexible Configuration**: Support for custom endpoints, project IDs, and model parameters
+- **Backward Compatibility**: Single-model evaluation still supported
+
+## 6. Installation and Setup
+
+### 6.1 Prerequisites
 - Python 3.8 or higher
 - Required Python packages (see requirements.txt)
 - API keys for LLM providers (optional for preprocessing-only mode)
 
-### 5.2 Installation Steps
+### 6.2 Installation Steps
 ```bash
 # Clone the repository
 git clone <repository-url>
@@ -695,7 +943,7 @@ pip install -r requirements.txt
 python src/run_evaluation.py --help
 ```
 
-### 5.3 API Key Configuration
+### 6.3 API Key Configuration
 ```bash
 # Option 1: Environment variables (recommended)
 export OPENAI_API_KEY="your-openai-api-key"
@@ -706,9 +954,9 @@ export ANTHROPIC_API_KEY="your-anthropic-api-key"
 python src/run_evaluation.py --api-key YOUR_KEY --provider openai ...
 ```
 
-## 6. Usage Examples
+## 7. Usage Examples
 
-### 6.1 Preprocessing Only
+### 7.1 Preprocessing Only
 ```bash
 # Basic preprocessing
 python src/run_evaluation.py \
@@ -725,7 +973,7 @@ python src/run_evaluation.py \
     --verbose
 ```
 
-### 6.2 Evaluation Only (Preprocessed Data)
+### 7.2 Evaluation Only (Preprocessed Data)
 ```bash
 # Evaluate with OpenAI
 python src/run_evaluation.py \
@@ -744,7 +992,7 @@ python src/run_evaluation.py \
     --output data/evaluated.jsonl
 ```
 
-### 6.3 Full Pipeline
+### 7.3 Full Pipeline
 ```bash
 # Complete preprocessing and evaluation
 python src/run_evaluation.py \
@@ -763,7 +1011,7 @@ python src/run_evaluation.py \
     --output data/gemini_results.jsonl
 ```
 
-### 6.4 Batch Folder Evaluation
+### 7.4 Batch Folder Evaluation
 ```bash
 # Evaluate all JSONL files in a folder
 python src/run_evaluation.py \
@@ -791,9 +1039,33 @@ python src/preprocess_agent_data.py \
     --output data/large_dataset_preprocessed.jsonl
 ```
 
-## 7. Configuration Options
+### 7.5 Multi-Model Evaluation
+```bash
+# Interactive multi-model configuration (recommended)
+python run_evaluation.py \
+    --input data/demo01.jsonl \
+    --multi-model \
+    --full-pipeline \
+    --output data/multi_model_results.jsonl
 
-### 7.1 Command Line Arguments
+# Multi-model with batch processing
+python run_evaluation.py \
+    --input data/predemo02/ \
+    --multi-model \
+    --batch-folder \
+    --batch-size 2 \
+    --rate-limit 2.0
+
+# Multi-model evaluation only (assumes preprocessed data)
+python run_evaluation.py \
+    --input data/preprocessed.jsonl \
+    --multi-model \
+    --output data/multi_results.jsonl
+```
+
+## 8. Configuration Options
+
+### 8.1 Command Line Arguments
 
 | Argument | Description | Default | Required |
 |----------|-------------|---------|----------|
@@ -813,7 +1085,7 @@ python src/preprocess_agent_data.py \
 
 *Required for evaluation modes
 
-### 7.2 Environment Variables
+### 8.2 Environment Variables
 
 | Variable | Description | Example |
 |----------|-------------|---------|
@@ -821,7 +1093,7 @@ python src/preprocess_agent_data.py \
 | `GOOGLE_API_KEY` | Google API key | `AIza...` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |
 
-### 7.3 Processing Modes
+### 8.3 Processing Modes
 
 | Mode | Description | Use Case |
 |------|-------------|----------|
@@ -830,9 +1102,142 @@ python src/preprocess_agent_data.py \
 | **Full Pipeline** | `--full-pipeline` | End-to-end processing |
 | **Batch Folder** | `--batch-folder` | Process multiple JSONL files in directory |
 
-## 8. Output Format
+## 9. Testing and Verification
 
-### 8.1 Preprocessing Output
+### 9.1 Test Suite Overview
+
+The system includes comprehensive testing tools to verify functionality and API connectivity:
+
+- **`test_multi_model_evaluation.py`**: Tests the multi-model evaluation system with mock clients
+- **`test_api_connectivity.py`**: Interactive tool to test real API connections
+- **`test.py`**: Original connectivity test tool
+
+### 9.2 Multi-Model Evaluation Testing
+
+#### 9.2.1 Running the Test Suite
+
+```bash
+# Run comprehensive multi-model tests
+python src/test_multi_model_evaluation.py
+```
+
+**Expected Output**:
+```
+Multi-Model Evaluation System Test Suite
+======================================================================
+
+Testing Model Configuration Creation...
+==================================================
+Created 6 model configurations:
+  - openai: gpt-4o
+  - google: gemini-1.5-pro
+  - anthropic: claude-3-5-sonnet-20241022
+  - deepseek: deepseek-chat
+  - kimi: moonshot-v1-8k
+  - vertex_ai: gemini-1.5-pro
+
+Testing Multi-Model Clip Evaluation...
+==================================================
+Clip Tool Type: microsandbox
+Number of Models: 3
+Successful Evaluations: 3
+Overall Success: True
+
+✓ ALL TESTS PASSED
+
+🎉 Multi-model evaluation system is working correctly!
+```
+
+#### 9.2.2 Test Components
+
+1. **Model Configuration**: Tests creation of configurations for all 6 providers
+2. **Clip Evaluation**: Tests parallel evaluation with multiple mock models
+3. **Score Averaging**: Verifies correct averaging of scores across models
+4. **File Generation**: Tests creation of individual model result files
+5. **Result Integration**: Tests embedding of averaged evaluations
+
+### 9.3 API Connectivity Testing
+
+#### 9.3.1 Interactive API Testing
+
+```bash
+# Test individual provider connections
+python src/test_api_connectivity.py
+```
+
+**Features**:
+- Interactive provider selection
+- Real API call testing
+- Connection validation
+- Detailed error reporting
+- Success rate tracking
+
+#### 9.3.2 Testing Workflow
+
+```
+LLM API Connectivity Test
+==================================================
+This tool helps you test API connectivity for all supported LLM providers.
+Supported providers: openai, google, anthropic, deepseek, kimi, vertex_ai
+
+Available providers:
+  1. openai ○
+  2. google ○
+  3. anthropic ○
+  4. deepseek ○
+  5. kimi ○
+  6. vertex_ai ○
+  0. Exit
+
+Select provider to test (1-6) or 0 to exit: 1
+
+Configuring OPENAI connection...
+Enter API key for openai: sk-...
+Model name (default: gpt-4o-mini): 
+
+Testing OPENAI connectivity...
+✓ Client created successfully
+  Provider: openai
+  Model: gpt-4o-mini
+Testing API call...
+✓ API call successful
+  Response received: 156 characters
+  Scores found: 2 metrics
+  Summary: Correct calculation...
+
+🎉 OPENAI connection successful!
+```
+
+### 9.4 Verification Checklist
+
+Before running production evaluations, verify:
+
+#### 9.4.1 System Prerequisites
+- [ ] Python 3.8+ installed
+- [ ] Required packages installed (`pip install -r requirements.txt`)
+- [ ] Input data in correct JSONL format
+
+#### 9.4.2 API Configuration
+- [ ] API keys obtained for desired providers
+- [ ] API keys tested with connectivity tool
+- [ ] Rate limits and quotas checked
+- [ ] Network connectivity verified
+
+#### 9.4.3 Multi-Model Setup
+- [ ] At least 2 providers configured for multi-model evaluation
+- [ ] Different model types selected for diversity
+- [ ] Appropriate rate limiting configured
+- [ ] Sufficient API quotas for batch processing
+
+#### 9.4.4 Output Verification
+- [ ] Individual model files generated correctly
+- [ ] Averaged scores computed properly
+- [ ] Embedded evaluations inserted in responses
+- [ ] Metadata includes all configured models
+
+## 10. Output Format
+
+### 10.1 Preprocessing Output
 ```json
 {
     "timestamp": "2025-07-03T20:11:01.914114",

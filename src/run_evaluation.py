@@ -37,7 +37,7 @@ from typing import Optional, List
 import glob
 
 # Import our modules
-from evaluation_service import EvaluationService
+from evaluation_service import EvaluationService, configure_multi_model
 from preprocess_agent_data import AgentDataPreprocessor
 
 # Configure logging
@@ -87,10 +87,12 @@ Examples:
                        help='Run full pipeline: preprocess + evaluate')
     parser.add_argument('--batch-folder', action='store_true',
                        help='Process all JSONL files in the input folder')
+    parser.add_argument('--multi-model', action='store_true',
+                       help='Use multi-model evaluation (interactive configuration)')
     
     # API configuration (required for evaluation modes)
     parser.add_argument('--provider', type=str, default='openai',
-                       choices=['openai', 'google', 'anthropic'],
+                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai'],
                        help='LLM provider to use (default: openai)')
     parser.add_argument('--api-key', type=str, default='',
                        help='API key for the LLM provider (or set environment variable)')
@@ -261,15 +263,21 @@ def print_mode_info(args: argparse.Namespace, jsonl_files: List[str]):
         print(f"\n MODE: Full Pipeline")
         print("  • Will preprocess data first")
         print("  • Then evaluate with LLM")
-        print(f"  • Provider: {args.provider}")
-        print(f"  • Model: {args.model or 'default'}")
+        if args.multi_model:
+            print("  • Evaluation: Multi-model (interactive configuration)")
+        else:
+            print(f"  • Provider: {args.provider}")
+            print(f"  • Model: {args.model or 'default'}")
         print(f"  • Batch size: {args.batch_size}")
     else:
         print(f"\n MODE: Evaluation Only")
         print("  • Assumes input is already preprocessed")
         print("  • Will evaluate directly with LLM")
-        print(f"  • Provider: {args.provider}")
-        print(f"  • Model: {args.model or 'default'}")
+        if args.multi_model:
+            print("  • Evaluation: Multi-model (interactive configuration)")
+        else:
+            print(f"  • Provider: {args.provider}")
+            print(f"  • Model: {args.model or 'default'}")
         print(f"  • Batch size: {args.batch_size}")
 
 
@@ -311,8 +319,16 @@ async def process_single_file(input_file: str, output_file: str, args: argparse.
     """Process a single JSONL file."""
     
     try:
-        # Get API key for evaluation modes
-        api_key = get_api_key(args.provider, args.api_key) if not args.preprocess_only else ""
+        # Multi-model configuration
+        model_configs = []
+        if args.multi_model and not args.preprocess_only:
+            model_configs = configure_multi_model()
+            if not model_configs:
+                logger.error("No models configured for multi-model evaluation")
+                return False
+        
+        # Get API key for evaluation modes (single model)
+        api_key = get_api_key(args.provider, args.api_key) if not args.preprocess_only and not args.multi_model else ""
         
         # Initialize evaluation service
         service = EvaluationService(
@@ -323,7 +339,9 @@ async def process_single_file(input_file: str, output_file: str, args: argparse.
             rate_limit_delay=args.rate_limit,
             preprocess_only=args.preprocess_only,
             full_pipeline=args.full_pipeline,
-            beta_threshold=args.beta_threshold
+            beta_threshold=args.beta_threshold,
+            multi_model=args.multi_model,
+            model_configs=model_configs
         )
         
         # Load data

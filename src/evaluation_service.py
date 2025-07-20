@@ -8,7 +8,8 @@ It integrates preprocessing and step-level evaluation with LLM APIs.
 
 Features:
 - Separate preprocessing and evaluation modes
-- Support for multiple LLM providers (OpenAI, Google, Anthropic)
+- Support for multiple LLM providers (OpenAI, Google, Anthropic, DeepSeek, Kimi, Vertex AI)
+- Multi-model evaluation with score averaging
 - Batch processing with rate limiting
 - Comprehensive reporting and statistics
 
@@ -16,8 +17,11 @@ Usage:
     # Preprocessing only
     python src/evaluation_service.py --input data/demo01.jsonl --preprocess-only --output data/preprocessed.jsonl
     
-    # LLM evaluation only (assumes input is already preprocessed)
+    # Single-model LLM evaluation
     python src/evaluation_service.py --input data/preprocessed.jsonl --provider openai --api-key YOUR_KEY --output data/results.jsonl
+    
+    # Multi-model evaluation
+    python src/evaluation_service.py --input data/preprocessed.jsonl --multi-model --output data/results.jsonl
     
     # Full pipeline (preprocess + evaluate)
     python src/evaluation_service.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --output data/results.jsonl
@@ -34,7 +38,8 @@ from pathlib import Path
 
 # Import our modules
 from preprocess_agent_data import AgentDataPreprocessor
-from step_level_evaluator import StepLevelEvaluator, create_evaluator
+from step_level_evaluator import StepLevelEvaluator, MultiModelStepLevelEvaluator, create_evaluator, create_multi_model_evaluator
+from llm_api_clients import ModelConfig, MultiModelEvaluationConfig
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -53,7 +58,9 @@ class EvaluationService:
                  preprocess_only: bool = False,
                  full_pipeline: bool = False,
                  beta_threshold: int = 15,
-                 split_size: int = 0):
+                 split_size: int = 0,
+                 multi_model: bool = False,
+                 model_configs: Optional[List[ModelConfig]] = None):
         
         self.provider = provider
         self.api_key = api_key
@@ -64,22 +71,34 @@ class EvaluationService:
         self.full_pipeline = full_pipeline
         self.beta_threshold = beta_threshold
         self.split_size = split_size
+        self.multi_model = multi_model
+        self.model_configs = model_configs or []
         
         # Initialize preprocessor
         self.preprocessor = AgentDataPreprocessor(beta_threshold=beta_threshold, split_size=split_size)
         
         # Initialize evaluator only if not preprocessing-only mode
         if not preprocess_only:
-            if not api_key:
-                raise ValueError(f"API key is required for {provider} evaluation. Please provide --api-key or set environment variable.")
-            
-            try:
-                self.evaluator = create_evaluator(provider, api_key, model_name)
-                self.evaluator.llm_client.set_rate_limit_delay(rate_limit_delay)
-                logger.info(f"Using {provider} for evaluation with model {model_name or 'default'}")
-            except Exception as e:
-                logger.error(f"Failed to initialize LLM client for {provider}: {e}")
-                raise
+            if multi_model and model_configs:
+                # Multi-model evaluation
+                try:
+                    self.evaluator = create_multi_model_evaluator(model_configs, rate_limit_delay)
+                    logger.info(f"Using multi-model evaluation with {len(model_configs)} models")
+                except Exception as e:
+                    logger.error(f"Failed to initialize multi-model evaluator: {e}")
+                    raise
+            else:
+                # Single-model evaluation
+                if not api_key:
+                    raise ValueError(f"API key is required for {provider} evaluation. Please provide --api-key or set environment variable.")
+                
+                try:
+                    self.evaluator = create_evaluator(provider, api_key, model_name)
+                    self.evaluator.multi_evaluator.llm_clients[0].set_rate_limit_delay(rate_limit_delay)
+                    logger.info(f"Using {provider} for evaluation with model {model_name or 'default'}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize LLM client for {provider}: {e}")
+                    raise
         else:
             self.evaluator = None
             logger.info("Preprocessing-only mode enabled")
@@ -95,290 +114,238 @@ class EvaluationService:
         }
     
     def load_data(self, input_path: str) -> List[Dict]:
-        """Load data from file or directory."""
-        
-        input_path = Path(input_path)
-        
-        if input_path.is_file():
-            if input_path.suffix == '.jsonl':
-                return self.preprocessor.load_jsonl(str(input_path))
+        """Load data from JSONL file or directory."""
+        try:
+            path = Path(input_path)
+            
+            if path.is_file():
+                # Single file
+                data = self.preprocessor.load_jsonl(str(path))
+                logger.info(f"Loaded {len(data)} samples from {input_path}")
+                return data
+            
+            elif path.is_dir():
+                # Directory with multiple files
+                all_data = []
+                jsonl_files = list(path.glob('*.jsonl'))
+                
+                if not jsonl_files:
+                    logger.error(f"No JSONL files found in directory: {input_path}")
+                    return []
+                
+                for file_path in sorted(jsonl_files):
+                    file_data = self.preprocessor.load_jsonl(str(file_path))
+                    all_data.extend(file_data)
+                    logger.info(f"Loaded {len(file_data)} samples from {file_path.name}")
+                
+                logger.info(f"Total loaded: {len(all_data)} samples from {len(jsonl_files)} files")
+                return all_data
+            
             else:
-                raise ValueError("Input file must be .jsonl format")
-        
-        elif input_path.is_dir():
-            # Load all .jsonl files in directory
-            all_data = []
-            for file_path in input_path.glob("*.jsonl"):
-                data = self.preprocessor.load_jsonl(str(file_path))
-                all_data.extend(data)
-            return all_data
-        
-        else:
-            raise ValueError(f"Input path does not exist: {input_path}")
-    
-    async def evaluate_single_sample(self, sample: Dict) -> Dict:
-        """Evaluate a single sample using the step-level evaluator."""
-        if self.evaluator is None:
-            raise RuntimeError("Evaluator not initialized. Cannot perform evaluation in preprocessing-only mode.")
-        
-        try:
-            # Use the new method that generates full responses
-            result = await self.evaluator.evaluate_trajectory_with_full_response(sample)
-            self.stats['evaluated_samples'] += 1
-            return result
+                logger.error(f"Input path does not exist: {input_path}")
+                return []
+                
         except Exception as e:
-            logger.error(f"Failed to evaluate sample {sample.get('task_id', 'unknown')}: {e}")
-            self.stats['failed_evaluations'] += 1
-            raise  # Re-raise the exception instead of returning mock data
-    
-    async def evaluate_batch(self, samples: List[Dict]) -> List[Dict]:
-        """Evaluate a batch of samples with rate limiting."""
-        
-        if self.evaluator is None:
-            raise RuntimeError("Evaluator not initialized. Cannot perform evaluation in preprocessing-only mode.")
-        
-        logger.info(f"Evaluating batch of {len(samples)} samples")
-        
-        # Create semaphore to limit concurrent evaluations
-        semaphore = asyncio.Semaphore(self.batch_size)
-        
-        async def evaluate_with_semaphore(sample):
-            async with semaphore:
-                return await self.evaluate_single_sample(sample)
-        
-        # Process all samples concurrently with rate limiting
-        tasks = [evaluate_with_semaphore(sample) for sample in samples]
-        
-        try:
-            evaluated_samples = await asyncio.gather(*tasks)
-            return evaluated_samples
-        except Exception as e:
-            logger.error(f"Batch evaluation failed: {e}")
-            raise
-    
-    def preprocess_data(self, data: List[Dict]) -> List[Dict]:
-        """Preprocess the data before evaluation."""
-        
-        logger.info(f"Preprocessing {len(data)} samples")
-        self.stats['total_samples'] = len(data)
-        
-        preprocessed = self.preprocessor.preprocess_data(data)
-        self.stats['preprocessed_samples'] = len(preprocessed)
-        
-        logger.info(f"Preprocessing completed: {len(preprocessed)} valid samples")
-        return preprocessed
-    
-    async def run_preprocessing_only(self, data: List[Dict]) -> List[Dict]:
-        """Run preprocessing only."""
-        
-        logger.info("Running preprocessing only...")
-        self.stats['start_time'] = time.time()
-        
-        # Preprocess data
-        preprocessed_data = self.preprocess_data(data)
-        
-        self.stats['end_time'] = time.time()
-        return preprocessed_data
-    
-    async def run_evaluation_only(self, data: List[Dict]) -> List[Dict]:
-        """Run evaluation only (assumes data is already preprocessed)."""
-        
-        logger.info("Running LLM evaluation only...")
-        self.stats['start_time'] = time.time()
-        
-        # Set stats for evaluation-only mode
-        self.stats['total_samples'] = len(data)
-        self.stats['preprocessed_samples'] = len(data)
-        
-        if not data:
-            logger.warning("No data provided for evaluation")
+            logger.error(f"Error loading data from {input_path}: {e}")
             return []
-        
-        # Evaluate in batches
-        evaluated_samples = []
-        batch_size = min(self.batch_size, 10)  # Limit batch size to avoid overwhelming APIs
-        
-        for i in range(0, len(data), batch_size):
-            batch = data[i:i + batch_size]
-            try:
-                batch_results = await self.evaluate_batch(batch)
-                evaluated_samples.extend(batch_results)
-                
-                # Log progress
-                logger.info(f"Completed batch {i//batch_size + 1}/{(len(data)-1)//batch_size + 1}")
-                
-                # Add delay between batches
-                if i + batch_size < len(data):
-                    await asyncio.sleep(self.rate_limit_delay)
-            except Exception as e:
-                logger.error(f"Failed to evaluate batch {i//batch_size + 1}: {e}")
-                raise
-        
-        self.stats['end_time'] = time.time()
-        return evaluated_samples
-    
-    async def run_full_pipeline(self, data: List[Dict]) -> List[Dict]:
-        """Run full pipeline: preprocess + evaluate."""
-        
-        logger.info("Running full pipeline (preprocess + evaluate)...")
-        self.stats['start_time'] = time.time()
-        
-        # Preprocess data
-        preprocessed_data = self.preprocess_data(data)
-        
-        if not preprocessed_data:
-            logger.warning("No valid samples after preprocessing")
-            return []
-        
-        # Evaluate in batches
-        evaluated_samples = []
-        batch_size = min(self.batch_size, 10)  # Limit batch size to avoid overwhelming APIs
-        
-        for i in range(0, len(preprocessed_data), batch_size):
-            batch = preprocessed_data[i:i + batch_size]
-            try:
-                batch_results = await self.evaluate_batch(batch)
-                evaluated_samples.extend(batch_results)
-                
-                # Log progress
-                logger.info(f"Completed batch {i//batch_size + 1}/{(len(preprocessed_data)-1)//batch_size + 1}")
-                
-                # Add delay between batches
-                if i + batch_size < len(preprocessed_data):
-                    await asyncio.sleep(self.rate_limit_delay)
-            except Exception as e:
-                logger.error(f"Failed to evaluate batch {i//batch_size + 1}: {e}")
-                raise
-        
-        self.stats['end_time'] = time.time()
-        return evaluated_samples
     
     async def process_data(self, data: List[Dict]) -> List[Dict]:
-        """Process data based on the configured mode."""
+        """Process data based on configured mode."""
+        self.stats['total_samples'] = len(data)
+        self.stats['start_time'] = time.time()
         
         if self.preprocess_only:
-            return await self.run_preprocessing_only(data)
+            # Preprocessing only
+            logger.info("Running preprocessing only...")
+            processed_data = self.preprocessor.preprocess_data(data)
+            self.stats['preprocessed_samples'] = len(processed_data)
+            
         elif self.full_pipeline:
-            return await self.run_full_pipeline(data)
+            # Full pipeline: preprocess + evaluate
+            logger.info("Running full pipeline: preprocessing + evaluation...")
+            
+            # Preprocess first
+            preprocessed_data = self.preprocessor.preprocess_data(data)
+            self.stats['preprocessed_samples'] = len(preprocessed_data)
+            
+            if not preprocessed_data:
+                logger.warning("No data remaining after preprocessing")
+                processed_data = []
+            else:
+                # Then evaluate
+                processed_data = await self._evaluate_data(preprocessed_data)
+        
         else:
-            # Evaluation only mode
-            return await self.run_evaluation_only(data)
+            # Evaluation only (assumes data is already preprocessed)
+            logger.info("Running evaluation only...")
+            processed_data = await self._evaluate_data(data)
+        
+        self.stats['end_time'] = time.time()
+        return processed_data
+    
+    async def _evaluate_data(self, data: List[Dict]) -> List[Dict]:
+        """Evaluate preprocessed data using configured evaluator."""
+        if not self.evaluator:
+            logger.error("No evaluator configured")
+            return data
+        
+        logger.info(f"Starting evaluation of {len(data)} samples...")
+        
+        # Create batches for parallel processing
+        batches = [data[i:i + self.batch_size] for i in range(0, len(data), self.batch_size)]
+        
+        evaluated_data = []
+        for i, batch in enumerate(batches):
+            logger.info(f"Processing batch {i+1}/{len(batches)} ({len(batch)} samples)")
+            
+            # Process batch in parallel
+            tasks = []
+            for sample in batch:
+                task = asyncio.create_task(self._evaluate_single_sample(sample))
+                tasks.append(task)
+            
+            # Wait for batch to complete
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for j, result in enumerate(batch_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Evaluation failed for sample {i * self.batch_size + j}: {result}")
+                    self.stats['failed_evaluations'] += 1
+                    # Add original sample with error info
+                    error_sample = batch[j].copy()
+                    error_sample['evaluation_error'] = str(result)
+                    evaluated_data.append(error_sample)
+                else:
+                    self.stats['evaluated_samples'] += 1
+                    evaluated_data.append(result)
+            
+            # Add delay between batches to respect rate limits
+            if i < len(batches) - 1:  # Don't delay after last batch
+                await asyncio.sleep(self.rate_limit_delay)
+        
+        logger.info(f"Evaluation completed: {self.stats['evaluated_samples']}/{len(data)} successful")
+        return evaluated_data
+    
+    async def _evaluate_single_sample(self, sample: Dict) -> Dict:
+        """Evaluate a single sample using the configured evaluator."""
+        try:
+            # Use the new output directory structure for multi-model files
+            output_dir = "data/model_evaluations"
+            
+            if self.multi_model:
+                # Multi-model evaluation
+                result = await self.evaluator.evaluate_trajectory_with_full_response(sample, output_dir)
+            else:
+                # Single-model evaluation  
+                result = await self.evaluator.evaluate_trajectory_with_full_response(sample)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Sample evaluation failed for {sample.get('task_id', 'unknown')}: {e}")
+            raise
     
     def save_results(self, processed_data: List[Dict], output_path: str):
-        """Save processing results to a single clean file."""
-        
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Calculate processing statistics for logging
-        processing_time = None
-        if self.stats['start_time'] and self.stats['end_time']:
-            processing_time = self.stats['end_time'] - self.stats['start_time']
-        
-        # Log processing statistics
-        logger.info(f"Processing completed:")
-        logger.info(f"  - Total samples processed: {len(processed_data)}")
-        logger.info(f"  - Processing time: {processing_time:.1f} seconds" if processing_time else "  - Processing time: N/A")
-        
-        if not self.preprocess_only:
-            success_rate = (self.stats['evaluated_samples'] / 
-                           self.stats['preprocessed_samples'] 
-                           if self.stats['preprocessed_samples'] > 0 else 0)
+        """Save processed results to file."""
+        try:
+            # Ensure output directory exists
+            output_file = Path(output_path)
+            output_file.parent.mkdir(parents=True, exist_ok=True)
             
-            samples_per_second = (self.stats['evaluated_samples'] / processing_time 
-                                 if processing_time and processing_time > 0 else 0)
-            
-            logger.info(f"  - Success rate: {success_rate:.1%}")
-            logger.info(f"  - Samples per second: {samples_per_second:.2f}")
-            logger.info(f"  - Provider: {self.provider}")
-            logger.info(f"  - Model: {self.model_name or 'default'}")
-            
-            # Calculate evaluation overview for logging
-            successful_evaluations = sum(1 for sample in processed_data 
-                                       if sample.get('evaluation_metadata', {}).get('overall_trajectory_score', 0) > 0)
-            average_clips = sum(len(sample.get('clip_evaluations', [])) for sample in processed_data) / len(processed_data) if processed_data else 0
-            
-            logger.info(f"Evaluation quality metrics:")
-            logger.info(f"  - Successful evaluations: {successful_evaluations}/{len(processed_data)}")
-            logger.info(f"  - Average clips per sample: {average_clips:.1f}")
-        
-        # Save clean JSONL file
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for sample in processed_data:
-                if self.preprocess_only:
-                    # For preprocessing only, save the preprocessed sample
-                    f.write(json.dumps(sample, ensure_ascii=False) + '\n')
-                else:
-                    # For evaluation, save clean sample with evaluation data
-                    clean_sample = {
-                        # Original trajectory data
-                        'timestamp': sample.get('timestamp', ''),
-                        'task_id': sample.get('task_id', ''),
-                        'task_description': sample.get('task_description', ''),
-                        'duration': sample.get('duration', 0),
-                        'success': sample.get('success', False),
-                        'final_result': sample.get('final_result', ''),
-                        'raw_response': sample.get('raw_response', ''),
+            # Save main results file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for sample in processed_data:
+                    # Create clean output with only the required fields
+                    if not self.preprocess_only:
+                        # For evaluation modes, only keep essential fields
+                        clean_sample = {
+                            'timestamp': sample.get('timestamp'),
+                            'task_id': sample.get('task_id'),
+                            'task_description': sample.get('task_description'),
+                            'duration': sample.get('duration'),
+                            'success': sample.get('success'),
+                            'final_result': sample.get('final_result'),
+                            'full_response_with_evaluation': sample.get('full_response_with_evaluation'),
+                            'evaluation_metadata': sample.get('evaluation_metadata')
+                        }
                         
-                        # Full response with embedded evaluations
-                        'full_response_with_evaluations': sample.get('full_response_with_evaluations', ''),
-                        
-                        # Core evaluation metadata only
-                        'evaluation_metadata': sample.get('evaluation_metadata', {})
-                    }
+                        # Remove None values
+                        clean_sample = {k: v for k, v in clean_sample.items() if v is not None}
+                    else:
+                        # For preprocessing mode, keep all fields
+                        clean_sample = sample
+                    
                     f.write(json.dumps(clean_sample, ensure_ascii=False) + '\n')
-        
-        mode_desc = "preprocessing" if self.preprocess_only else "evaluation"
-        logger.info(f"Clean {mode_desc} results saved to {output_path}")
-        
-        if not self.preprocess_only:
-            logger.info(f"File contains: original data + full_response_with_evaluations + evaluation_metadata")
+            
+            logger.info(f"Results saved to {output_path}")
+            
+        except Exception as e:
+            logger.error(f"Error saving results to {output_path}: {e}")
+            raise
     
     def print_summary(self):
         """Print processing summary."""
-        
-        processing_time = (self.stats['end_time'] - self.stats['start_time'] 
-                          if self.stats['start_time'] and self.stats['end_time'] else 0)
-        
         print("\n" + "="*60)
-        if self.preprocess_only:
-            print("PREPROCESSING SERVICE SUMMARY")
-        else:
-            print("EVALUATION SERVICE SUMMARY")
+        print("EVALUATION SERVICE SUMMARY")
         print("="*60)
         
+        # Processing mode
+        if self.preprocess_only:
+            mode = "Preprocessing Only"
+        elif self.full_pipeline:
+            mode = "Full Pipeline (Preprocess + Evaluate)"
+        else:
+            mode = "Evaluation Only"
+        print(f"Mode: {mode}")
+        
+        # Multi-model info
         if not self.preprocess_only:
-            print(f"Provider: {self.provider}")
-            print(f"Model: {self.model_name or 'default'}")
-            print(f"Mode: {'Full Pipeline' if self.full_pipeline else 'Evaluation Only'}")
-            print("-" * 30)
+            if self.multi_model:
+                print(f"Evaluation: Multi-model ({len(self.model_configs)} models)")
+                for config in self.model_configs:
+                    print(f"  • {config.provider}: {config.model_name}")
+            else:
+                print(f"Evaluation: Single model ({self.provider}: {self.model_name or 'default'})")
         
-        print(f"Total samples: {self.stats['total_samples']}")
-        print(f"Preprocessed: {self.stats['preprocessed_samples']}")
+        # Statistics
+        print(f"\nSample Statistics:")
+        print(f"  Total samples: {self.stats['total_samples']}")
         
+        if self.full_pipeline or self.preprocess_only:
+            print(f"  Preprocessed: {self.stats['preprocessed_samples']}")
+            
         if not self.preprocess_only:
-            print(f"Evaluated: {self.stats['evaluated_samples']}")
-            print(f"Failed: {self.stats['failed_evaluations']}")
-            print(f"Success rate: {(self.stats['evaluated_samples']/self.stats['preprocessed_samples']*100 if self.stats['preprocessed_samples'] > 0 else 0):.1f}%")
+            print(f"  Evaluated: {self.stats['evaluated_samples']}")
+            print(f"  Failed: {self.stats['failed_evaluations']}")
+            
+            if self.stats['total_samples'] > 0:
+                success_rate = (self.stats['evaluated_samples'] / self.stats['total_samples']) * 100
+                print(f"  Success rate: {success_rate:.1f}%")
         
-        print("-" * 30)
-        print(f"Processing time: {processing_time:.1f} seconds")
-        
-        if not self.preprocess_only:
-            print(f"Samples per second: {(self.stats['evaluated_samples']/processing_time if processing_time > 0 else 0):.2f}")
+        # Timing
+        if self.stats['start_time'] and self.stats['end_time']:
+            duration = self.stats['end_time'] - self.stats['start_time']
+            print(f"\nProcessing time: {duration:.2f} seconds")
+            
+            if self.stats['evaluated_samples'] > 0:
+                avg_time = duration / self.stats['evaluated_samples']
+                print(f"Average time per sample: {avg_time:.2f} seconds")
         
         print("="*60)
 
 
 async def main():
-    """Main function for the evaluation service."""
-    
-    parser = argparse.ArgumentParser(description='AI Agent Trajectory Evaluation Service')
+    """Main function for running the evaluation service."""
+    parser = argparse.ArgumentParser(
+        description='AI Agent Trajectory Evaluation Service',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     
     # Input/Output arguments
-    parser.add_argument('--input', type=str, required=True,
+    parser.add_argument('--input', '-i', type=str, required=True,
                        help='Input JSONL file or directory path')
-    parser.add_argument('--output', type=str, default='data/processed_results.jsonl',
+    parser.add_argument('--output', '-o', type=str, default='data/demo01_eva.jsonl',
                        help='Output file path for results')
     
     # Processing mode
@@ -386,49 +353,50 @@ async def main():
                        help='Only run preprocessing, skip evaluation')
     parser.add_argument('--full-pipeline', action='store_true',
                        help='Run full pipeline: preprocess + evaluate')
+    parser.add_argument('--multi-model', action='store_true',
+                       help='Use multi-model evaluation (interactive configuration)')
     
-    # API configuration (only needed for evaluation)
+    # Single model API configuration
     parser.add_argument('--provider', type=str, default='openai',
-                       choices=['openai', 'google', 'anthropic'],
-                       help='LLM provider to use')
+                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai'],
+                       help='LLM provider for single-model evaluation')
     parser.add_argument('--api-key', type=str, default='',
-                       help='API key for the LLM provider')
+                       help='API key for single-model evaluation')
     parser.add_argument('--model', type=str, default=None,
-                       help='Specific model name to use')
+                       help='Model name for single-model evaluation')
     
     # Processing configuration
     parser.add_argument('--batch-size', type=int, default=3,
                        help='Number of concurrent evaluations')
     parser.add_argument('--rate-limit', type=float, default=1.0,
-                       help='Delay between API requests (seconds)')
+                       help='Delay between API requests in seconds')
+    parser.add_argument('--beta-threshold', type=int, default=15,
+                       help='Maximum tool calls per sample in preprocessing')
     
-    # Logging configuration
-    parser.add_argument('--verbose', action='store_true',
+    # Logging
+    parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose logging')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='Suppress progress output')
     
     args = parser.parse_args()
     
-    # Configure logging level
+    # Configure logging
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    elif args.quiet:
+        logging.getLogger().setLevel(logging.WARNING)
     
-    # Get API key from environment if not provided
-    if not args.preprocess_only and not args.api_key:
-        env_key_map = {
-            'openai': 'OPENAI_API_KEY',
-            'google': 'GOOGLE_API_KEY',
-            'anthropic': 'ANTHROPIC_API_KEY'
-        }
-        env_key = env_key_map.get(args.provider)
-        if env_key:
-            args.api_key = os.getenv(env_key, '')
-        
-        if not args.api_key:
-            logger.error(f"API key required for {args.provider} evaluation. Please provide --api-key or set environment variable {env_key}.")
+    # Multi-model configuration
+    model_configs = []
+    if args.multi_model and not args.preprocess_only:
+        model_configs = configure_multi_model()
+        if not model_configs:
+            logger.error("No models configured for multi-model evaluation")
             return
     
     try:
-        # Initialize evaluation service
+        # Initialize service
         service = EvaluationService(
             provider=args.provider,
             api_key=args.api_key,
@@ -436,32 +404,121 @@ async def main():
             batch_size=args.batch_size,
             rate_limit_delay=args.rate_limit,
             preprocess_only=args.preprocess_only,
-            full_pipeline=args.full_pipeline
+            full_pipeline=args.full_pipeline,
+            beta_threshold=args.beta_threshold,
+            multi_model=args.multi_model,
+            model_configs=model_configs
         )
         
-        # Load data
-        logger.info(f"Loading data from {args.input}")
+        # Load and process data
         data = service.load_data(args.input)
-        
         if not data:
-            logger.error("No data loaded. Exiting.")
+            logger.error("No data loaded")
             return
         
-        # Process data
-        logger.info("Starting processing...")
         processed_data = await service.process_data(data)
         
         # Save results
         service.save_results(processed_data, args.output)
         
         # Print summary
-        service.print_summary()
-        
-        logger.info("Processing completed successfully!")
-        
+        if not args.quiet:
+            service.print_summary()
+            
     except Exception as e:
-        logger.error(f"Processing failed: {e}")
-        raise
+        logger.error(f"Service failed: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+
+
+def configure_multi_model() -> List[ModelConfig]:
+    """Interactive configuration for multi-model evaluation."""
+    print("\n" + "="*60)
+    print("MULTI-MODEL EVALUATION CONFIGURATION")
+    print("="*60)
+    print("Configure multiple LLM models for evaluation.")
+    print("Supported providers: openai, google, anthropic, deepseek, kimi, vertex_ai")
+    print("Press Enter with empty input to finish configuration.")
+    print()
+    
+    model_configs = []
+    
+    while True:
+        print(f"\nConfiguring Model #{len(model_configs) + 1}")
+        print("-" * 30)
+        
+        # Get provider
+        provider = input("Provider (openai/google/anthropic/deepseek/kimi/vertex_ai): ").strip().lower()
+        if not provider:
+            break
+        
+        if provider not in ['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai']:
+            print("Invalid provider. Please choose from: openai, google, anthropic, deepseek, kimi, vertex_ai")
+            continue
+        
+        # Get API key
+        api_key = input(f"API key for {provider}: ").strip()
+        if not api_key:
+            print("API key is required")
+            continue
+        
+        # Get model name (with defaults)
+        defaults = {
+            'openai': 'gpt-4o',
+            'google': 'gemini-1.5-pro',
+            'anthropic': 'claude-3-5-sonnet-20241022',
+            'deepseek': 'deepseek-chat',
+            'kimi': 'moonshot-v1-8k',
+            'vertex_ai': 'gemini-1.5-pro'
+        }
+        
+        default_model = defaults.get(provider, '')
+        model_name = input(f"Model name (default: {default_model}): ").strip() or default_model
+        
+        # Additional configuration for specific providers
+        endpoint_url = None
+        project_id = None
+        
+        if provider in ['deepseek', 'kimi']:
+            endpoint_url = input(f"Endpoint URL (press Enter for default): ").strip() or None
+        
+        if provider == 'vertex_ai':
+            project_id = input("Google Cloud Project ID: ").strip()
+            if not project_id:
+                print("Project ID is required for Vertex AI")
+                continue
+        
+        # Create model config
+        config = ModelConfig(
+            provider=provider,
+            model_name=model_name,
+            api_key=api_key,
+            endpoint_url=endpoint_url,
+            project_id=project_id
+        )
+        
+        model_configs.append(config)
+        print(f"✓ Added {provider}:{model_name}")
+        
+        # Ask if user wants to add more models
+        if len(model_configs) >= 5:  # Limit to prevent too many models
+            print("\nMaximum of 5 models reached.")
+            break
+        
+        add_more = input("\nAdd another model? (y/N): ").strip().lower()
+        if add_more not in ['y', 'yes']:
+            break
+    
+    if model_configs:
+        print(f"\n✓ Multi-model configuration completed with {len(model_configs)} models:")
+        for i, config in enumerate(model_configs, 1):
+            print(f"  {i}. {config.provider}: {config.model_name}")
+    else:
+        print("No models configured.")
+    
+    print("="*60)
+    return model_configs
 
 
 if __name__ == "__main__":
