@@ -10,11 +10,20 @@ Usage Examples:
     # Preprocessing only
     python run_evaluation.py --input data/demo01.jsonl --preprocess-only --output data/preprocessed.jsonl
 
-    # LLM evaluation only (assumes input is already preprocessed)
+    # Single-model LLM evaluation (assumes input is already preprocessed)
     python run_evaluation.py --input data/preprocessed.jsonl --provider openai --api-key YOUR_KEY --output data/results.jsonl
 
-    # Full pipeline (preprocess + evaluate)
+    # Full pipeline with single model (preprocess + evaluate)
     python run_evaluation.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --output data/results.jsonl
+
+    # Multi-model evaluation with interactive configuration (preprocess + evaluate)
+    python run_evaluation.py --input data/demo01.jsonl --multi-model --full-pipeline --output data/results.jsonl
+
+    # Multi-model evaluation only (assumes preprocessed data)
+    python run_evaluation.py --input data/preprocessed.jsonl --multi-model --output data/results.jsonl
+
+    # Test multi-model configuration before running evaluation
+    python src/test_multi_model_interactive.py
 
     # Batch evaluation with custom settings
     python run_evaluation.py --input data/ --provider google --model gemini-1.5-pro --batch-size 5 --rate-limit 2.0 --full-pipeline
@@ -22,7 +31,7 @@ Usage Examples:
     # Evaluate all JSONL files in a folder
     python run_evaluation.py --input data/predemo02/ --provider openai --api-key YOUR_KEY --batch-folder
 
-    # Use environment variables for API keys
+    # Use environment variables for API keys (single-model only)
     export OPENAI_API_KEY=your_key
     python run_evaluation.py --input data/demo01.jsonl --provider openai --full-pipeline
 """
@@ -56,11 +65,20 @@ Examples:
   # Preprocessing only
   python run_evaluation.py --input data/demo01.jsonl --preprocess-only
 
-  # LLM evaluation only (assumes input is already preprocessed)
+  # Single-model LLM evaluation (assumes input is already preprocessed)
   python run_evaluation.py --input data/preprocessed.jsonl --provider openai --api-key YOUR_KEY
 
-  # Full pipeline (preprocess + evaluate)
+  # Full pipeline with single model (preprocess + evaluate)
   python run_evaluation.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline
+
+  # Multi-model evaluation (interactive configuration)
+  python run_evaluation.py --input data/demo01.jsonl --multi-model --full-pipeline
+
+  # Multi-model evaluation only (assumes preprocessed data)
+  python run_evaluation.py --input data/preprocessed.jsonl --multi-model
+
+  # Test multi-model configuration before running evaluation
+  python src/test_multi_model_interactive.py
 
   # Batch evaluation with custom settings
   python run_evaluation.py --input data/ --provider google --model gemini-1.5-pro --batch-size 5 --full-pipeline
@@ -68,7 +86,7 @@ Examples:
   # Evaluate all JSONL files in a folder
   python run_evaluation.py --input data/predemo02/ --provider openai --api-key YOUR_KEY --batch-folder
 
-  # Use environment variables for API keys
+  # Use environment variables for API keys (single-model only)
   export OPENAI_API_KEY=your_key
   python run_evaluation.py --input data/demo01.jsonl --provider openai --full-pipeline
         """
@@ -92,11 +110,12 @@ Examples:
     
     # API configuration (required for evaluation modes)
     parser.add_argument('--provider', type=str, default='openai',
-                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai'],
+                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai',
+                               'openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks'],
                        help='LLM provider to use (default: openai)')
     parser.add_argument('--api-key', type=str, default='',
                        help='API key for the LLM provider (or set environment variable)')
-    parser.add_argument('--model', type=str, default=None, 
+    parser.add_argument('--model', type=str, default=None,
                        help='Specific model name to use (provider default if not specified)')
     
     # Processing configuration
@@ -191,8 +210,8 @@ def validate_args(args: argparse.Namespace) -> bool:
         logger.error(f"Input path does not exist: {args.input}")
         return False
     
-    # Check API key requirements for evaluation modes
-    if not args.preprocess_only:
+    # Check API key requirements for evaluation modes (skip for multi-model mode)
+    if not args.preprocess_only and not args.multi_model:
         api_key = get_api_key(args.provider, args.api_key)
         if not api_key:
             env_key_map = {
@@ -204,7 +223,8 @@ def validate_args(args: argparse.Namespace) -> bool:
             logger.error(f"API key required for {args.provider} evaluation. Please:")
             logger.error(f"  1. Use --api-key YOUR_KEY")
             logger.error(f"  2. Set environment variable: export {env_key}=your_key")
-            logger.error(f"  3. Or use --preprocess-only to skip evaluation")
+            logger.error(f"  3. Use --multi-model for interactive model configuration")
+            logger.error(f"  4. Or use --preprocess-only to skip evaluation")
             return False
     
     # Validate batch size
@@ -322,27 +342,55 @@ async def process_single_file(input_file: str, output_file: str, args: argparse.
         # Multi-model configuration
         model_configs = []
         if args.multi_model and not args.preprocess_only:
-            model_configs = configure_multi_model()
-            if not model_configs:
-                logger.error("No models configured for multi-model evaluation")
+            try:
+                print("\n Starting multi-model configuration...")
+                model_configs = configure_multi_model()
+                if not model_configs:
+                    logger.error(" No models configured for multi-model evaluation")
+                    return False
+                else:
+                    print(f" Multi-model configuration completed with {len(model_configs)} models")
+            except KeyboardInterrupt:
+                print("\n  Configuration interrupted by user")
+                return False
+            except Exception as e:
+                logger.error(f" Error during multi-model configuration: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
                 return False
         
         # Get API key for evaluation modes (single model)
         api_key = get_api_key(args.provider, args.api_key) if not args.preprocess_only and not args.multi_model else ""
         
         # Initialize evaluation service
-        service = EvaluationService(
-            provider=args.provider,
-            api_key=api_key,
-            model_name=args.model,
-            batch_size=args.batch_size,
-            rate_limit_delay=args.rate_limit,
-            preprocess_only=args.preprocess_only,
-            full_pipeline=args.full_pipeline,
-            beta_threshold=args.beta_threshold,
-            multi_model=args.multi_model,
-            model_configs=model_configs
-        )
+        try:
+            if args.multi_model and model_configs:
+                print(f"🔧 Initializing multi-model evaluation service with {len(model_configs)} models...")
+            elif not args.preprocess_only:
+                print(f"🔧 Initializing single-model evaluation service ({args.provider})...")
+            else:
+                print("🔧 Initializing preprocessing-only service...")
+                
+            service = EvaluationService(
+                provider=args.provider,
+                api_key=api_key,
+                model_name=args.model,
+                batch_size=args.batch_size,
+                rate_limit_delay=args.rate_limit,
+                preprocess_only=args.preprocess_only,
+                full_pipeline=args.full_pipeline,
+                beta_threshold=args.beta_threshold,
+                multi_model=args.multi_model,
+                model_configs=model_configs
+            )
+            print(" Evaluation service initialized successfully")
+        except Exception as e:
+            logger.error(f" Failed to initialize evaluation service: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            return False
         
         # Load data
         logger.info(f"Processing file: {input_file}")

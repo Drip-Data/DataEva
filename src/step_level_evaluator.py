@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 from pathlib import Path
 import statistics
+import time
 
 from llm_api_clients import BaseLLMClient, LLMClientFactory, EvaluationConfig, EvaluationResponse, MultiModelEvaluationConfig, ModelConfig
 
@@ -472,51 +473,132 @@ class MultiModelStepLevelEvaluator:
         return result
     
     def _save_individual_model_results(self, evaluations: List[MultiModelClipEvaluation], task_id: str, output_dir: Path):
-        """Save detailed results for each model to separate JSON files."""
+        """Save consolidated multi-model evaluation results to a single JSON file per task."""
         
-        # Group results by model
-        model_results = defaultdict(list)
+        # Create consolidated structure
+        consolidated_data = {
+            'task_id': task_id,
+            'evaluation_metadata': {
+                'total_clips': len(evaluations),
+                'total_models': len(self.llm_clients),
+                'model_names': [f"{client.provider_name}_{client.model_name}" for client in self.llm_clients],
+                'successful_clips': sum(1 for eval in evaluations if eval.success),
+                'evaluation_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            },
+            'clip_evaluations': []
+        }
         
-        for evaluation in evaluations:
-            for model_key, model_eval in evaluation.model_evaluations.items():
-                model_results[model_key].append({
-                    'clip_index': len(model_results[model_key]),
+        # Process each clip evaluation
+        for clip_index, evaluation in enumerate(evaluations):
+            clip_data = {
+                'clip_index': clip_index,
+                'input': {
                     'tool_type': evaluation.clip.tool_type,
                     'clip_content': evaluation.clip.content,
-                    'evaluation_input': {
-                        'prompt_length': len(str(evaluation.clip.content)),
-                        'tool_type': evaluation.clip.tool_type,
-                        'has_tool_call': evaluation.clip.has_tool_call
-                    },
-                    'evaluation_output': {
-                        'success': model_eval.success,
-                        'scores': model_eval.scores,
-                        'summary': model_eval.summary,
-                        'reasoning': model_eval.reasoning,
-                        'model_name': model_eval.model_name,
-                        'provider': model_eval.provider,
-                        'raw_response': model_eval.raw_response,
-                        'error_message': model_eval.error_message
-                    }
-                })
-        
-        # Save each model's results to a separate file
-        for model_key, results in model_results.items():
-            filename = f"{model_key}_{task_id}_eva.json"
-            filepath = output_dir / filename
+                    'has_tool_call': evaluation.clip.has_tool_call,
+                    'tool_call_content': evaluation.clip.tool_call_content,
+                    'result_content': evaluation.clip.result_content,
+                    'start_index': evaluation.clip.start_index,
+                    'end_index': evaluation.clip.end_index,
+                    'prompt_length': len(str(evaluation.clip.content)),
+                    'applicable_metrics': evaluation.tool_metrics
+                },
+                'model_outputs': {},
+                'averaged_results': {
+                    'success': evaluation.success,
+                    'scores': evaluation.averaged_scores,
+                    'summary': evaluation.averaged_summary,
+                    'reasoning': evaluation.averaged_reasoning,
+                    'successful_models': evaluation.num_successful_models,
+                    'total_models': len(evaluation.model_evaluations)
+                }
+            }
             
+            # Add individual model outputs
+            for model_key, model_eval in evaluation.model_evaluations.items():
+                clip_data['model_outputs'][model_key] = {
+                    'success': model_eval.success,
+                    'scores': model_eval.scores,
+                    'summary': model_eval.summary,
+                    'reasoning': model_eval.reasoning,
+                    'model_name': model_eval.model_name,
+                    'provider': model_eval.provider,
+                    'raw_response': model_eval.raw_response,
+                    'error_message': model_eval.error_message if not model_eval.success else None
+                }
+            
+            consolidated_data['clip_evaluations'].append(clip_data)
+        
+        # Calculate overall task-level averaged scores
+        all_successful_scores = []
+        for evaluation in evaluations:
+            if evaluation.success and evaluation.averaged_scores:
+                all_successful_scores.append(evaluation.averaged_scores)
+        
+        if all_successful_scores:
+            # Calculate task-level averages
+            task_averaged_scores = self._average_scores(all_successful_scores)
+            
+            # Calculate score statistics (min, max, std) for each metric
+            score_statistics = {}
+            for metric in task_averaged_scores.keys():
+                metric_values = [scores.get(metric, 0.0) for scores in all_successful_scores if metric in scores]
+                if metric_values:
+                    score_statistics[metric] = {
+                        'average': task_averaged_scores[metric],
+                        'min': min(metric_values),
+                        'max': max(metric_values),
+                        'std': statistics.stdev(metric_values) if len(metric_values) > 1 else 0.0,
+                        'count': len(metric_values)
+                    }
+            
+            consolidated_data['task_level_averages'] = {
+                'overall_scores': task_averaged_scores,
+                'score_statistics': score_statistics,
+                'successful_clips_ratio': len(all_successful_scores) / len(evaluations) if evaluations else 0.0
+            }
+        else:
+            consolidated_data['task_level_averages'] = {
+                'overall_scores': {},
+                'score_statistics': {},
+                'successful_clips_ratio': 0.0,
+                'note': 'No successful evaluations for averaging'
+            }
+        
+        # Save consolidated file
+        filename = f"multi_model_{task_id}_evaluation.json"
+        filepath = output_dir / filename
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(consolidated_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f" Saved consolidated multi-model evaluation: {filepath}")
+            logger.info(f"    {len(evaluations)} clips, {len(self.llm_clients)} models, {len(all_successful_scores)} successful clip evaluations")
+            
+            # Log task-level average scores
+            if consolidated_data['task_level_averages']['overall_scores']:
+                avg_scores = consolidated_data['task_level_averages']['overall_scores']
+                score_summary = ", ".join([f"{k}: {v:.3f}" for k, v in list(avg_scores.items())[:3]])
+                logger.info(f"    Task average scores: {score_summary}{'...' if len(avg_scores) > 3 else ''}")
+            
+        except Exception as e:
+            logger.error(f" Failed to save consolidated model results: {e}")
+            # Fallback to save basic structure
             try:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'task_id': task_id,
-                        'model_name': model_key,
-                        'total_clips': len(results),
-                        'evaluations': results
-                    }, f, indent=2, ensure_ascii=False)
-                
-                logger.info(f"Saved individual model results: {filepath}")
-            except Exception as e:
-                logger.error(f"Failed to save model results for {model_key}: {e}")
+                fallback_data = {
+                    'task_id': task_id,
+                    'error': str(e),
+                    'basic_info': {
+                        'total_clips': len(evaluations),
+                        'total_models': len(self.llm_clients)
+                    }
+                }
+                with open(output_dir / f"error_{task_id}_evaluation.json", 'w') as f:
+                    json.dump(fallback_data, f, indent=2)
+                logger.info(f" Saved error fallback file for task {task_id}")
+            except:
+                logger.error(f" Complete failure to save any results for task {task_id}")
     
     def _insert_averaged_evaluations(self, raw_response: str, evaluations: List[MultiModelClipEvaluation]) -> str:
         """Insert averaged evaluation results into the raw response."""

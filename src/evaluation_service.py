@@ -358,7 +358,8 @@ async def main():
     
     # Single model API configuration
     parser.add_argument('--provider', type=str, default='openai',
-                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai'],
+                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai',
+                               'openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks'],
                        help='LLM provider for single-model evaluation')
     parser.add_argument('--api-key', type=str, default='',
                        help='API key for single-model evaluation')
@@ -438,82 +439,180 @@ def configure_multi_model() -> List[ModelConfig]:
     print("MULTI-MODEL EVALUATION CONFIGURATION")
     print("="*60)
     print("Configure multiple LLM models for evaluation.")
-    print("Supported providers: openai, google, anthropic, deepseek, kimi, vertex_ai")
-    print("Press Enter with empty input to finish configuration.")
     print()
+    print("Available providers:")
+    print("  • Native: openai, google, anthropic, deepseek, kimi, vertex_ai")
+    print("  • Third-party: openai_compatible, anthropic_compatible, openrouter, together, groq, fireworks")
+    print()
+    print("Instructions:")
+    print("  • You will be prompted to enter information for each model")
+    print("  • Type 'enough' when you're done adding models")
+    print("  • At least one model is required for evaluation")
+    print("="*60)
     
     model_configs = []
+    model_number = 1
     
     while True:
-        print(f"\nConfiguring Model #{len(model_configs) + 1}")
-        print("-" * 30)
+        print(f"\n🔧 CONFIGURING MODEL #{model_number}")
+        print("-" * 40)
         
         # Get provider
-        provider = input("Provider (openai/google/anthropic/deepseek/kimi/vertex_ai): ").strip().lower()
-        if not provider:
+        while True:
+            print("\nStep 1: Choose Provider")
+            print("Native providers: openai, google, anthropic, deepseek, kimi, vertex_ai")
+            print("Third-party providers: openai_compatible, anthropic_compatible, openrouter, together, groq, fireworks")
+            provider = input(f"Provider for Model #{model_number} (or 'enough' to finish): ").strip().lower()
+            
+            if provider == 'enough':
+                if len(model_configs) == 0:
+                    print("You need to configure at least one model. Please continue.")
+                    continue
+                else:
+                    print(f"Configuration complete with {len(model_configs)} models.")
+                    break
+            
+            supported_providers = [
+                'openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai',
+                'openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks'
+            ]
+            
+            if provider in supported_providers:
+                break
+            else:
+                print(f"Invalid provider '{provider}'. Please choose from: {', '.join(supported_providers)}")
+        
+        # Break if user typed 'enough'
+        if provider == 'enough':
             break
         
-        if provider not in ['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai']:
-            print("Invalid provider. Please choose from: openai, google, anthropic, deepseek, kimi, vertex_ai")
-            continue
-        
         # Get API key
-        api_key = input(f"API key for {provider}: ").strip()
-        if not api_key:
-            print("API key is required")
-            continue
+        while True:
+            print(f"\nStep 2: API Key")
+            api_key = input(f"API key for {provider}: ").strip()
+            if api_key:
+                break
+            else:
+                print("API key is required. Please enter a valid API key.")
         
         # Get model name (with defaults)
+        print(f"\nStep 3: Model Name")
         defaults = {
             'openai': 'gpt-4o',
             'google': 'gemini-1.5-pro',
             'anthropic': 'claude-3-5-sonnet-20241022',
             'deepseek': 'deepseek-chat',
             'kimi': 'moonshot-v1-8k',
-            'vertex_ai': 'gemini-1.5-pro'
+            'vertex_ai': 'gemini-1.5-pro',
+            'openai_compatible': 'gpt-4',
+            'anthropic_compatible': 'claude-3-sonnet',
+            'openrouter': 'gpt-4',
+            'together': 'meta-llama/Llama-2-70b-chat-hf',
+            'groq': 'llama2-70b-4096',
+            'fireworks': 'accounts/fireworks/models/llama-v2-70b-chat'
         }
         
-        default_model = defaults.get(provider, '')
+        default_model = defaults.get(provider, 'default-model')
         model_name = input(f"Model name (default: {default_model}): ").strip() or default_model
         
         # Additional configuration for specific providers
         endpoint_url = None
+        base_url = None
         project_id = None
+        protocol = None
+        custom_headers = None
         
-        if provider in ['deepseek', 'kimi']:
-            endpoint_url = input(f"Endpoint URL (press Enter for default): ").strip() or None
+        # Third-party providers need base_url
+        if provider in ['openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks']:
+            print(f"\nStep 4: Base URL (Required for {provider})")
+            while True:
+                base_url = input(f"Base URL for {provider}: ").strip()
+                if base_url:
+                    break
+                else:
+                    print("Base URL is required for third-party providers.")
+            
+            # Ask for custom headers (optional)
+            print(f"\nStep 5: Custom Headers (Optional)")
+            print("Some third-party services require custom headers (e.g., x-foo: true)")
+            headers_input = input("Custom headers in format 'key1:value1,key2:value2' (press Enter to skip): ").strip()
+            if headers_input:
+                try:
+                    custom_headers = {}
+                    for header_pair in headers_input.split(','):
+                        key, value = header_pair.split(':')
+                        custom_headers[key.strip()] = value.strip()
+                    print(f"Custom headers set: {custom_headers}")
+                except Exception as e:
+                    print(f" Invalid header format, skipping: {e}")
+            
+            # Set protocol based on provider
+            if provider in ['openai_compatible', 'openrouter', 'together', 'groq', 'fireworks']:
+                protocol = 'openai'
+            elif provider == 'anthropic_compatible':
+                protocol = 'anthropic'
         
-        if provider == 'vertex_ai':
-            project_id = input("Google Cloud Project ID: ").strip()
-            if not project_id:
-                print("Project ID is required for Vertex AI")
-                continue
+        # Native providers that might need endpoint URL
+        elif provider in ['deepseek', 'kimi']:
+            print(f"\nStep 4: Endpoint URL (Optional)")
+            endpoint_url = input(f"Endpoint URL for {provider} (press Enter for default): ").strip() or None
+        
+        # Vertex AI specific
+        elif provider == 'vertex_ai':
+            print(f"\nStep 4: Google Cloud Configuration")
+            while True:
+                project_id = input("Google Cloud Project ID: ").strip()
+                if project_id:
+                    break
+                else:
+                    print("Project ID is required for Vertex AI.")
         
         # Create model config
-        config = ModelConfig(
-            provider=provider,
-            model_name=model_name,
-            api_key=api_key,
-            endpoint_url=endpoint_url,
-            project_id=project_id
-        )
-        
-        model_configs.append(config)
-        print(f"✓ Added {provider}:{model_name}")
-        
-        # Ask if user wants to add more models
-        if len(model_configs) >= 5:  # Limit to prevent too many models
-            print("\nMaximum of 5 models reached.")
-            break
-        
-        add_more = input("\nAdd another model? (y/N): ").strip().lower()
-        if add_more not in ['y', 'yes']:
-            break
+        try:
+            config = ModelConfig(
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                endpoint_url=endpoint_url,
+                project_id=project_id,
+                base_url=base_url,
+                protocol=protocol,
+                custom_headers=custom_headers
+            )
+            
+            model_configs.append(config)
+            print(f"\nSuccessfully added Model #{model_number}:")
+            print(f"   Provider: {provider}")
+            print(f"   Model: {model_name}")
+            if base_url:
+                print(f"   Base URL: {base_url}")
+            if project_id:
+                print(f"   Project ID: {project_id}")
+            
+            model_number += 1
+            
+            # Limit to prevent too many models
+            if len(model_configs) >= 5:
+                print(f"\n Maximum of 5 models reached. Configuration complete.")
+                break
+                
+        except Exception as e:
+            print(f"Error creating model configuration: {e}")
+            print("Please try again with different settings.")
+            continue
     
+    # Summary
+    print("\n" + "="*60)
+    print("CONFIGURATION SUMMARY")
+    print("="*60)
     if model_configs:
-        print(f"\n✓ Multi-model configuration completed with {len(model_configs)} models:")
+        print(f"Successfully configured {len(model_configs)} models:")
         for i, config in enumerate(model_configs, 1):
-            print(f"  {i}. {config.provider}: {config.model_name}")
+            display_name = f"{config.provider}: {config.model_name}"
+            if config.base_url:
+                display_name += f" (URL: {config.base_url})"
+            print(f"   {i}. {display_name}")
+        print(f"\nThese models will be used for step-level evaluation.")
     else:
         print("No models configured.")
     
