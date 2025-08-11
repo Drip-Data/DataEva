@@ -3,7 +3,7 @@ import json
 import logging
 import asyncio
 from typing import Dict, List, Tuple, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 from pathlib import Path
 import statistics
@@ -18,22 +18,23 @@ logger = logging.getLogger(__name__)
 class Clip:
     """Represents a clip in the trajectory for evaluation."""
     content: str
-    tool_type: str
+    tool_type: str  # Now represents the categorized MCP type (deepsearch, microsandbox, tavily, perform_web_task)
     start_index: int
     end_index: int
-    has_tool_call: bool = True
-    tool_call_content: str = ""
+    clip_number: int  # clip1, clip2, etc.
+    is_final_clip: bool = False  # True if this is the final <think></think> <answer></answer> clip
+    think_content: str = ""
     result_content: str = ""
+    sub_task_think_content: str = ""  # Content from <sub_task_think> if present
+    tool_calls: List[str] = field(default_factory=list)  # List of meta tool calls found in this clip
 
 
 @dataclass
 class ClipEvaluation:
     """Evaluation result for a single clip."""
     clip: Clip
-    scores: Dict[str, float]
-    summary: str
-    reasoning: str
-    tool_metrics: List[str]
+    evaluation: str  # good/normal/bad
+    summary: str  # One-sentence summary of what was done in the clip
     success: bool
 
 
@@ -42,87 +43,196 @@ class MultiModelClipEvaluation:
     """Evaluation result from multiple models for a single clip."""
     clip: Clip
     model_evaluations: Dict[str, EvaluationResponse]  # model_name -> evaluation
-    averaged_scores: Dict[str, float]
-    averaged_summary: str
-    averaged_reasoning: str
-    tool_metrics: List[str]
+    averaged_evaluation: str  # good/normal/bad (majority vote)
+    averaged_summary: str  # Combined summary
     success: bool
     num_successful_models: int
 
 
-class PromptTemplates:
-    """Prompt templates for different tool types."""
+@dataclass
+class CategoryEvaluation:
+    """Evaluation result for a group of clips in the same MCP category."""
+    category: str
+    clips: List[Clip]
+    clip_evaluations: List[MultiModelClipEvaluation]
+    scores: Dict[str, float]  # Category-specific detailed scores
+    summary: str
+    reasoning: str
+    success: bool
+
+
+@dataclass
+class MultiModelCategoryEvaluation:
+    """Multi-model evaluation result for a category."""
+    category: str
+    clips: List[Clip]
+    clip_evaluations: List[MultiModelClipEvaluation]
+    model_evaluations: Dict[str, EvaluationResponse]  # model_name -> category evaluation
+    averaged_scores: Dict[str, float]  # Averaged detailed scores
+    averaged_summary: str
+    individual_reasoning: Dict[str, str]  # model_name -> reasoning (not concatenated)
+    success: bool
+    num_successful_models: int
+
+
+class MetaToolCategorizer:
+    """Categorizes meta tool calls into MCP server categories."""
     
-    MICROSANDBOX_TEMPLATE = """
-You are evaluating an AI agent's use of the MicroSandbox tool (code execution and computational tools).
+    # Based on explaination.md
+    TOOL_CATEGORIES = {
+        'deepsearch': ['deepsearch'],
+        'microsandbox': ['sandbox_start', 'sandbox_stop', 'sandbox_run_code', 'sandbox_run_command', 'sandbox_get_metrice'],
+        'tavily': ['tavily-search', 'tavily-extract', 'tavily-crawl', 'tavily-map'],
+        'perform_web_task': [
+            'search_google', 'go_to_url', 'go_back', 'click_element_by_index', 
+            'input_text', 'switch_tab', 'close_tab', 'extract_structured_data', 
+            'scroll', 'done', 'write_file', 'replace_file_str', 'wait'
+        ]
+    }
+    
+    @classmethod
+    def categorize_tool(cls, tool_name: str) -> str:
+        """Categorize a meta tool call into its MCP server category."""
+        for category, tools in cls.TOOL_CATEGORIES.items():
+            if tool_name in tools:
+                return category
+        return 'unknown'  # Fallback for uncategorized tools
+    
+    @classmethod
+    def extract_tool_calls_from_content(cls, content: str) -> List[str]:
+        """Extract tool call names from clip content."""
+        import re
+        # Look for "name": "tool_name" patterns in tool_call blocks
+        tool_pattern = r'"name":\s*"([^"]+)"'
+        matches = re.findall(tool_pattern, content)
+        return matches
+
+
+class PromptTemplates:
+    """Prompt templates for clip and category evaluation."""
+    
+    BASE_TEMPLATE = """
+You are evaluating an AI agent's step-by-step task execution. Each clip represents a thinking-action-result sequence.
 
 Task Description: {task_description}
 
-Previous Context: {previous_context}
+Previous Clips Summary: {previous_context}
 
-Current Clip Content:
+Current Clip (Clip {clip_number}):
+Tool Category: {tool_category}
+Tools Used: {tools_used}
+Content:
 {clip_content}
 
-Evaluation Criteria for MicroSandbox:
+Please evaluate this clip and provide your assessment in the following JSON format:
+{{
+    "evaluation": "good",  // Must be exactly one of: "good", "normal", "bad"
+    "summary": "Detailed summary of what was done in this clip: the thinking process, which specific tools were called with what parameters, the results obtained, and how they contribute to solving the task. This summary will be used for subsequent evaluations so include important context and details."
+}}
+
+Evaluation Guidelines:
+- "good": The clip shows effective tool usage, clear reasoning, and achieves its intended purpose
+- "normal": The clip shows adequate tool usage with minor issues or inefficiencies  
+- "bad": The clip shows poor tool usage, unclear reasoning, or fails to achieve its purpose
+
+Focus on:
+1. Appropriateness of tool selection for the task
+2. Quality of reasoning in the <think> section
+3. Effectiveness of tool usage and result interpretation
+4. Contribution to overall task progress
+5. How this clip builds upon previous clips' work
+"""
+
+    FINAL_CLIP_TEMPLATE = """
+You are evaluating the final part of an AI agent's task execution where it provides the final answer.
+
+Task Description: {task_description}
+
+Previous Clips Summary: {previous_context}
+
+Final Clip:
+Content:
+{clip_content}
+
+Please evaluate this final clip and provide your assessment in the following JSON format:
+{{
+    "evaluation": "good",  // Must be exactly one of: "good", "normal", "bad"
+    "summary": "Detailed summary of the final answer: what conclusion was reached, how it addresses the original task, the quality and accuracy of the answer, and overall task completion status."
+}}
+
+Evaluation Guidelines:
+- "good": The final answer is complete, accurate, and properly addresses the original task
+- "normal": The final answer is adequate but may have minor issues or incompleteness
+- "bad": The final answer is incorrect, incomplete, or doesn't address the task
+
+Focus on:
+1. Correctness and completeness of the final answer
+2. How well it addresses the original task  
+3. Quality of reasoning leading to the conclusion
+"""
+
+    # Category-specific comprehensive evaluation templates
+    DEEPSEARCH_CATEGORY_TEMPLATE = """
+You are conducting a comprehensive evaluation of an AI agent's use of deepsearch tools across multiple clips.
+
+Task Description: {task_description}
+
+Clips in this deepsearch category (with individual evaluations): {clips_summary}
+
+Please evaluate this deepsearch category comprehensively using these metrics:
+1. Information Relevance (0.0-1.0): How relevant is the retrieved information to the task?
+2. Tool use quality (0.0-1.0): Is the sequence of tool use logical and efficient?
+3. Source Quality (0.0-1.0): Are high-quality, credible and rich sources being used?
+4. Information Synthesis (0.0-1.0): How well is information from multiple sources synthesized and summarized?
+
+Please provide your evaluation in the following JSON format:
+{{
+    "scores": {{
+        "information_relevance": 0.85,
+        "tool_use_quality": 0.90,
+        "source_quality": 0.75,
+        "information_synthesis": 0.80
+    }},
+    "summary": "One sentence overall assessment of the deepsearch category performance",
+    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how the clips work together as a sequence, what was done well, what could be improved, and how this category contributes to the overall task completion. Provide specific examples from the clips to justify your scoring."
+}}
+"""
+
+    MICROSANDBOX_CATEGORY_TEMPLATE = """
+You are conducting a comprehensive evaluation of an AI agent's use of microsandbox tools across multiple clips.
+
+Task Description: {task_description}
+
+Clips in this microsandbox category: {clips_summary}
+
+Please evaluate this microsandbox category comprehensively using these metrics:
 1. Code Correctness (0.0-1.0): Is the code syntactically correct and logically sound?
-2. Computational Efficiency (0.0-1.0): Does the code solve the problem efficiently?
-3. Error Handling (0.0-1.0): Are potential errors and edge cases handled properly?
+2. Tool use quality (0.0-1.0): Is the sequence of tool use logical and efficient?
+3. Computational Efficiency (0.0-1.0): Does the code solve the problem efficiently?
 4. Result Interpretation (0.0-1.0): Are the computational results correctly interpreted?
 
 Please provide your evaluation in the following JSON format:
 {{
     "scores": {{
         "code_correctness": 0.85,
-        "computational_efficiency": 0.70,
-        "error_handling": 0.60,
-        "result_interpretation": 0.90
+        "tool_use_quality": 0.90,
+        "computational_efficiency": 0.75,
+        "result_interpretation": 0.80
     }},
-    "summary": "Brief summary of the clip evaluation",
-    "reasoning": "Detailed reasoning for the scores given"
+    "summary": "One sentence overall assessment of the microsandbox category performance",
+    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how the clips work together as a sequence, what was done well, what could be improved, and how this category contributes to the overall task completion. Provide specific examples from the clips to justify your scoring."
 }}
 """
 
-    DEEPSEARCH_TEMPLATE = """
-You are evaluating an AI agent's use of the DeepSearch tool (research and information gathering).
+    PERFORM_WEB_TASK_CATEGORY_TEMPLATE = """
+You are conducting a comprehensive evaluation of an AI agent's use of web task tools across multiple clips.
 
 Task Description: {task_description}
 
-Previous Context: {previous_context}
+Clips in this perform_web_task category: {clips_summary}
 
-Current Clip Content:
-{clip_content}
-
-Evaluation Criteria for DeepSearch:
-1. Query Formulation (0.0-1.0): How well-formulated and specific are the search queries?
-2. Information Relevance (0.0-1.0): How relevant is the retrieved information to the task?
-3. Source Quality (0.0-1.0): Are high-quality, credible sources being used?
-4. Information Synthesis (0.0-1.0): How well is information from multiple sources synthesized?
-
-Please provide your evaluation in the following JSON format:
-{{
-    "scores": {{
-        "query_formulation": 0.85,
-        "information_relevance": 0.90,
-        "source_quality": 0.75,
-        "information_synthesis": 0.80
-    }},
-    "summary": "Brief summary of the clip evaluation",
-    "reasoning": "Detailed reasoning for the scores given"
-}}
-"""
-
-    BROWSER_USE_TEMPLATE = """
-You are evaluating an AI agent's use of the Browser Use tool (web browsing and content extraction).
-
-Task Description: {task_description}
-
-Previous Context: {previous_context}
-
-Current Clip Content:
-{clip_content}
-
-Evaluation Criteria for Browser Use:
-1. Navigation Efficiency (0.0-1.0): How efficiently does the agent navigate web pages?
+Please evaluate this perform_web_task category comprehensively using these metrics:
+1. Tool use quality (0.0-1.0): Is the sequence of tool use logical and efficient?
 2. Content Extraction (0.0-1.0): How accurately is relevant content extracted?
 3. Interaction Quality (0.0-1.0): How appropriate are the web interactions (clicks, inputs)?
 4. Goal Achievement (0.0-1.0): How well does the browsing contribute to task completion?
@@ -130,58 +240,53 @@ Evaluation Criteria for Browser Use:
 Please provide your evaluation in the following JSON format:
 {{
     "scores": {{
-        "navigation_efficiency": 0.85,
+        "tool_use_quality": 0.85,
         "content_extraction": 0.90,
         "interaction_quality": 0.75,
         "goal_achievement": 0.80
     }},
-    "summary": "Brief summary of the clip evaluation",
-    "reasoning": "Detailed reasoning for the scores given"
+    "summary": "One sentence overall assessment of the perform_web_task category performance",
+    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how the clips work together as a sequence, what was done well, what could be improved, and how this category contributes to the overall task completion. Provide specific examples from the clips to justify your scoring."
 }}
 """
 
-    SEARCH_TOOL_TEMPLATE = """
-You are evaluating an AI agent's use of the Search Tool (file and code search capabilities).
+    TAVILY_CATEGORY_TEMPLATE = """
+You are conducting a comprehensive evaluation of an AI agent's use of tavily tools across multiple clips.
 
 Task Description: {task_description}
 
-Previous Context: {previous_context}
+Clips in this tavily category: {clips_summary}
 
-Current Clip Content:
-{clip_content}
-
-Evaluation Criteria for Search Tool:
-1. Search Strategy (0.0-1.0): How effective are the search strategies employed?
-2. Pattern Recognition (0.0-1.0): How well does the agent identify relevant patterns?
-3. Result Filtering (0.0-1.0): How appropriately are search results filtered and selected?
-4. Tool Integration (0.0-1.0): How well is the search tool integrated with other tools?
+Please evaluate this tavily category comprehensively using these metrics:
+1. Tool use quality (0.0-1.0): Is the sequence of tool use logical and efficient?
+2. Information Relevance (0.0-1.0): How relevant is the retrieved information to the task?
+3. Content Extraction (0.0-1.0): How accurately is relevant content extracted?
+4. Goal Achievement (0.0-1.0): How well does the browsing contribute to task completion?
 
 Please provide your evaluation in the following JSON format:
 {{
     "scores": {{
-        "search_strategy": 0.85,
-        "pattern_recognition": 0.90,
-        "result_filtering": 0.75,
-        "tool_integration": 0.80
+        "tool_use_quality": 0.85,
+        "information_relevance": 0.90,
+        "content_extraction": 0.75,
+        "goal_achievement": 0.80
     }},
-    "summary": "Brief summary of the clip evaluation",
-    "reasoning": "Detailed reasoning for the scores given"
+    "summary": "One sentence overall assessment of the tavily category performance",
+    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how the clips work together as a sequence, what was done well, what could be improved, and how this category contributes to the overall task completion. Provide specific examples from the clips to justify your scoring."
 }}
 """
 
-    FINAL_TEMPLATE = """
-You are evaluating the final part of an AI agent's response (task completion and overall quality).
+    FINAL_CATEGORY_TEMPLATE = """
+You are conducting a comprehensive evaluation of the entire trajectory completion across all clips.
 
 Task Description: {task_description}
 
-Previous Context: {previous_context}
+Complete trajectory with all clip summaries and evaluations:
+{clips_summary}
 
-Current Clip Content:
-{clip_content}
-
-Evaluation Criteria for Final Response:
-1. Task Completion (0.0-1.0): How completely is the original task addressed?
-2. Response Quality (0.0-1.0): How clear, accurate, and well-structured is the response?
+Please evaluate the overall trajectory comprehensively using these metrics:
+1. Task Completion (0.0-1.0): How completely is the task addressed?
+2. Tool use quality (0.0-1.0): Is the sequence of tool use logical and efficient?
 3. Reasoning Coherence (0.0-1.0): How logical and coherent is the overall reasoning chain?
 4. Problem Resolution (0.0-1.0): How effectively are any encountered problems resolved?
 
@@ -189,12 +294,12 @@ Please provide your evaluation in the following JSON format:
 {{
     "scores": {{
         "task_completion": 0.85,
-        "response_quality": 0.90,
+        "tool_use_quality": 0.90,
         "reasoning_coherence": 0.75,
         "problem_resolution": 0.80
     }},
-    "summary": "Brief summary of the clip evaluation",
-    "reasoning": "Detailed reasoning for the scores given"
+    "summary": "One sentence overall assessment of the complete trajectory performance",
+    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how all the clips and categories work together to complete the task, what was done well throughout the trajectory, what could be improved, and the overall quality of task completion. Provide specific examples from different parts of the trajectory to justify your scoring."
 }}
 """
 
@@ -210,127 +315,176 @@ class MultiModelStepLevelEvaluator:
         if not self.llm_clients:
             raise ValueError("No valid LLM clients could be created from the configuration")
         
-        # Tool-specific prompt templates
-        self.prompt_templates = {
-            'microsandbox': PromptTemplates.MICROSANDBOX_TEMPLATE,
-            'deepsearch': PromptTemplates.DEEPSEARCH_TEMPLATE,
-            'browser_use': PromptTemplates.BROWSER_USE_TEMPLATE,
-            'search_tool': PromptTemplates.SEARCH_TOOL_TEMPLATE,
-            'final': PromptTemplates.FINAL_TEMPLATE
-        }
-        
-        # Tool-specific metrics
-        self.tool_metrics = {
-            'microsandbox': ['code_correctness', 'computational_efficiency', 'error_handling', 'result_interpretation'],
-            'deepsearch': ['query_formulation', 'information_relevance', 'source_quality', 'information_synthesis'],
-            'browser_use': ['navigation_efficiency', 'content_extraction', 'interaction_quality', 'goal_achievement'],
-            'search_tool': ['search_strategy', 'pattern_recognition', 'result_filtering', 'tool_integration'],
-            'final': ['task_completion', 'response_quality', 'reasoning_coherence', 'problem_resolution']
-        }
-        
         logger.info(f"Initialized multi-model evaluator with {len(self.llm_clients)} models")
     
     def extract_clips(self, raw_response: str) -> List[Clip]:
-        """Extract clips from the trajectory based on tool usage patterns."""
+        """Extract clips from the trajectory based on <think></think> <tool_call></tool_call> <result></result> patterns."""
         clips = []
+        clip_number = 1
         
-        # Find all tool call patterns
-        tool_patterns = {
-            'microsandbox': r'<microsandbox[^>]*>(.*?)</microsandbox>',
-            'deepsearch': r'<deepsearch[^>]*>(.*?)</deepsearch>',
-            'browser_use': r'<browser_use[^>]*>(.*?)</browser_use>',
-            'search_tool': r'<search_tool[^>]*>(.*?)</search_tool>'
-        }
+        # Find pattern: <think>...</think><tool_call>...</tool_call><result>...</result>
+        # Or final pattern: <think>...</think><answer>...</answer>
         
-        # Find all tool calls and their positions
-        tool_matches = []
-        for tool_type, pattern in tool_patterns.items():
-            matches = list(re.finditer(pattern, raw_response, re.DOTALL | re.IGNORECASE))
-            for match in matches:
-                tool_matches.append({
-                    'tool_type': tool_type,
-                    'start': match.start(),
-                    'end': match.end(),
-                    'content': match.group(1).strip(),
-                    'full_match': match.group(0)
-                })
+        # First, find all <think> blocks with optional <sub_task_think>
+        think_pattern = r'<think>(.*?)</think>(?:\s*<sub_task_think>(.*?)</sub_task_think>)?'
+        think_matches = list(re.finditer(think_pattern, raw_response, re.DOTALL | re.IGNORECASE))
         
-        # Sort matches by position
-        tool_matches.sort(key=lambda x: x['start'])
+        # Find all <tool_call> blocks  
+        tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
+        tool_call_matches = list(re.finditer(tool_call_pattern, raw_response, re.DOTALL | re.IGNORECASE))
         
-        # Create clips
-        last_end = 0
+        # Find all <result> and <answer> blocks
+        result_pattern = r'<result>(.*?)</result>'
+        answer_pattern = r'<answer>(.*?)</answer>'
         
-        for i, match in enumerate(tool_matches):
-            # Get context before the tool call
-            context_start = max(last_end, match['start'] - 500)  # Include some context
-            context_end = match['end']
+        result_matches = list(re.finditer(result_pattern, raw_response, re.DOTALL | re.IGNORECASE))
+        answer_matches = list(re.finditer(answer_pattern, raw_response, re.DOTALL | re.IGNORECASE))
+        
+        # For each <think>, find the corresponding <tool_call> and <result>/<answer>
+        for think_match in think_matches:
+            think_content = think_match.group(1).strip()
+            sub_task_think_content = think_match.group(2).strip() if think_match.group(2) else ""
+            think_end = think_match.end()
             
-            # Find any result content after the tool call
-            next_start = tool_matches[i + 1]['start'] if i + 1 < len(tool_matches) else len(raw_response)
-            result_end = min(next_start, match['end'] + 200)  # Look ahead for results
+            # Find next tool_call after this think
+            corresponding_tool_call = None
+            for tool_call in tool_call_matches:
+                if tool_call.start() > think_end:
+                    corresponding_tool_call = tool_call
+                    break
             
-            clip_content = raw_response[context_start:result_end].strip()
+            # Find next result/answer after this think (or tool_call)
+            search_start = corresponding_tool_call.end() if corresponding_tool_call else think_end
+            corresponding_result = None
+            is_final_clip = False
             
-            # Extract tool call content and result
-            tool_call_content = match['content']
-            result_content = raw_response[match['end']:result_end].strip()
+            # Check for result first
+            for result in result_matches:
+                if result.start() > search_start:
+                    corresponding_result = result
+                    break
             
-            clip = Clip(
-                content=clip_content,
-                tool_type=match['tool_type'],
-                start_index=context_start,
-                end_index=result_end,
-                has_tool_call=True,
-                tool_call_content=tool_call_content,
-                result_content=result_content
-            )
-            clips.append(clip)
-            last_end = result_end
-        
-        # Add final clip for task completion if there's remaining content
-        if last_end < len(raw_response) - 50:  # Only if there's substantial content
-            final_content = raw_response[last_end:].strip()
-            if final_content:
-                final_clip = Clip(
-                    content=final_content,
-                    tool_type='final',
-                    start_index=last_end,
-                    end_index=len(raw_response),
-                    has_tool_call=False,
-                    tool_call_content="",
-                    result_content=final_content
+            # If no result found, check for answer (final clip)
+            if not corresponding_result:
+                for answer in answer_matches:
+                    if answer.start() > search_start:
+                        corresponding_result = answer
+                        is_final_clip = True
+                        break
+            
+            if corresponding_result:
+                # Extract the full clip content
+                clip_start = think_match.start()
+                clip_end = corresponding_result.end()
+                clip_content = raw_response[clip_start:clip_end].strip()
+                
+                # Extract tool calls from the tool_call block if it exists
+                tool_calls = []
+                if corresponding_tool_call:
+                    tool_calls = MetaToolCategorizer.extract_tool_calls_from_content(corresponding_tool_call.group(1))
+                
+                # Determine tool category based on tool calls
+                tool_category = 'final' if is_final_clip else 'unknown'
+                if tool_calls and not is_final_clip:
+                    categories = [MetaToolCategorizer.categorize_tool(tool) for tool in tool_calls]
+                    if categories:
+                        from collections import Counter
+                        tool_category = Counter(categories).most_common(1)[0][0]
+                
+                clip = Clip(
+                    content=clip_content,
+                    tool_type=tool_category,
+                    start_index=clip_start,
+                    end_index=clip_end,
+                    clip_number=clip_number,
+                    is_final_clip=is_final_clip,
+                    think_content=think_content,
+                    result_content=corresponding_result.group(1).strip(),
+                    sub_task_think_content=sub_task_think_content,
+                    tool_calls=tool_calls
                 )
-                clips.append(final_clip)
+                clips.append(clip)
+                clip_number += 1
         
-        logger.info(f"Extracted {len(clips)} clips: {[clip.tool_type for clip in clips]}")
+        logger.info(f"Extracted {len(clips)} clips: {[f'clip{clip.clip_number}({clip.tool_type})' for clip in clips]}")
         return clips
     
-    def _build_context_summary(self, clips: List[Clip], current_index: int) -> str:
-        """Build a summary of previous clips for context."""
+    def _build_context_summary(self, clips: List[Clip], current_index: int, clip_evaluations: List[MultiModelClipEvaluation] = None) -> str:
+        """Build a summary of previous clips with their evaluation results for context."""
         if current_index == 0:
             return "This is the first step in the trajectory."
         
         summaries = []
-        for i in range(min(3, current_index)):  # Include up to 3 previous clips
-            clip = clips[current_index - 1 - i]
-            tool_info = f"Used {clip.tool_type}"
-            if clip.tool_call_content:
-                call_preview = clip.tool_call_content[:100] + "..." if len(clip.tool_call_content) > 100 else clip.tool_call_content
-                tool_info += f": {call_preview}"
-            summaries.insert(0, tool_info)  # Insert at beginning to maintain order
+        # Include ALL previous clips, not just the last 3
+        for i in range(current_index):
+            clip = clips[i]
+            tools_used = ", ".join(clip.tool_calls) if clip.tool_calls else "no tools"
+            
+            # Include evaluation result if available
+            if clip_evaluations and i < len(clip_evaluations):
+                evaluation_result = clip_evaluations[i].averaged_evaluation
+                summary_text = clip_evaluations[i].averaged_summary
+                summary = f"Clip {clip.clip_number} ({clip.tool_type}): {summary_text} (Evaluation: {evaluation_result})"
+            else:
+                summary = f"Clip {clip.clip_number} ({clip.tool_type}): Used {tools_used} (Evaluation: not yet available)"
+            
+            summaries.append(summary)
         
-        return " → ".join(summaries)
+        return "\n".join(summaries)
+    
+    def _group_clips_by_category(self, clips: List[Clip]) -> List[List[Clip]]:
+        """Group consecutive clips by their MCP category."""
+        if not clips:
+            return []
+        
+        groups = []
+        current_group = [clips[0]]
+        current_category = clips[0].tool_type
+        
+        for clip in clips[1:]:
+            # Final clips are always in their own group
+            if clip.is_final_clip:
+                if current_group:
+                    groups.append(current_group)
+                groups.append([clip])  # Final clip gets its own group
+                current_group = []
+                current_category = None
+            elif clip.tool_type == current_category:
+                current_group.append(clip)
+            else:
+                # Category changed, start new group
+                if current_group:
+                    groups.append(current_group)
+                current_group = [clip]
+                current_category = clip.tool_type
+        
+        # Add remaining group
+        if current_group:
+            groups.append(current_group)
+        
+        return groups
     
     async def evaluate_clip_with_all_models(self, clip: Clip, task_description: str, previous_context: str) -> MultiModelClipEvaluation:
         """Evaluate a single clip using all configured models."""
-        # Get the appropriate prompt template
-        template = self.prompt_templates.get(clip.tool_type, PromptTemplates.FINAL_TEMPLATE)
-        prompt = template.format(
-            task_description=task_description,
-            previous_context=previous_context,
-            clip_content=clip.content
-        )
+        # Choose appropriate template based on whether it's the final clip
+        if clip.is_final_clip:
+            template = PromptTemplates.FINAL_CLIP_TEMPLATE
+            prompt = template.format(
+                task_description=task_description,
+                previous_context=previous_context,
+                clip_content=clip.content
+            )
+        else:
+            template = PromptTemplates.BASE_TEMPLATE
+            tools_used = ", ".join(clip.tool_calls) if clip.tool_calls else "no tools"
+            prompt = template.format(
+                task_description=task_description,
+                previous_context=previous_context,
+                clip_number=clip.clip_number,
+                tool_category=clip.tool_type,
+                tools_used=tools_used,
+                clip_content=clip.content
+            )
         
         # Evaluate with all models in parallel
         tasks = []
@@ -360,28 +514,54 @@ class MultiModelStepLevelEvaluator:
                 if evaluation.success:
                     successful_evaluations.append(evaluation)
         
-        # Calculate averaged scores
+        # Calculate averaged evaluation
         if successful_evaluations:
-            averaged_scores = self._average_scores([eval.scores for eval in successful_evaluations])
-            averaged_summary = self._average_text([eval.summary for eval in successful_evaluations])
-            averaged_reasoning = self._average_text([eval.reasoning for eval in successful_evaluations])
+            # Mode for evaluation (good/normal/bad)
+            averaged_evaluation = self._average_evaluation([eval.scores.get('evaluation', 'normal') for eval in successful_evaluations])
+            # Concatenate summaries with model names
+            summaries_by_model = {}
+            for i, eval in enumerate(successful_evaluations):
+                client = self.llm_clients[i] if i < len(self.llm_clients) else None
+                model_key = f"{client.provider_name}_{client.model_name}" if client else f"model_{i}"
+                summaries_by_model[model_key] = eval.summary
+            averaged_summary = self._concatenate_summaries(summaries_by_model)
             success = True
         else:
-            averaged_scores = {}
+            averaged_evaluation = "bad"  # Default to bad if all failed
             averaged_summary = "All model evaluations failed"
-            averaged_reasoning = "No successful evaluations available"
             success = False
         
         return MultiModelClipEvaluation(
             clip=clip,
             model_evaluations=model_evaluations,
-            averaged_scores=averaged_scores,
+            averaged_evaluation=averaged_evaluation,
             averaged_summary=averaged_summary,
-            averaged_reasoning=averaged_reasoning,
-            tool_metrics=self.tool_metrics.get(clip.tool_type, []),
             success=success,
             num_successful_models=len(successful_evaluations)
         )
+    
+    def _average_evaluation(self, evaluations: List[str]) -> str:
+        """Average evaluations using majority vote (mode)."""
+        if not evaluations:
+            return "normal"
+        
+        from collections import Counter
+        counts = Counter(evaluations)
+        # Return the most common evaluation, defaulting to "normal" in case of tie
+        most_common = counts.most_common(1)[0][0] if counts else "normal"
+        return most_common
+    
+    def _concatenate_summaries(self, summaries_by_model: Dict[str, str]) -> str:
+        """Concatenate summaries from different models."""
+        if not summaries_by_model:
+            return ""
+        
+        concatenated = []
+        for model_name, summary in summaries_by_model.items():
+            if summary.strip():
+                concatenated.append(f"{model_name}: {summary.strip()}")
+        
+        return " | ".join(concatenated)
     
     def _average_scores(self, score_lists: List[Dict[str, float]]) -> Dict[str, float]:
         """Average scores across multiple evaluations."""
@@ -401,6 +581,170 @@ class MultiModelStepLevelEvaluator:
         
         return averaged
     
+    async def evaluate_category_with_all_models(self, category: str, clips: List[Clip], clip_evaluations: List[MultiModelClipEvaluation], task_description: str) -> MultiModelCategoryEvaluation:
+        """Evaluate a category (group of clips) with all models."""
+        
+        # Build clips summary for category evaluation as required: summary + evaluation result for each clip
+        clips_summary_parts = []
+        for i, (clip, evaluation) in enumerate(zip(clips, clip_evaluations)):
+            clip_summary = f"Clip {clip.clip_number}: {evaluation.averaged_summary} (Evaluation: {evaluation.averaged_evaluation})"
+            clips_summary_parts.append(clip_summary)
+        
+        clips_summary = "\n".join(clips_summary_parts)
+        
+        # Choose appropriate template based on category
+        category_templates = {
+            'deepsearch': PromptTemplates.DEEPSEARCH_CATEGORY_TEMPLATE,
+            'microsandbox': PromptTemplates.MICROSANDBOX_CATEGORY_TEMPLATE,
+            'perform_web_task': PromptTemplates.PERFORM_WEB_TASK_CATEGORY_TEMPLATE,
+            'tavily': PromptTemplates.TAVILY_CATEGORY_TEMPLATE,
+            'final': PromptTemplates.FINAL_CATEGORY_TEMPLATE
+        }
+        
+        template = category_templates.get(category, PromptTemplates.FINAL_CATEGORY_TEMPLATE)
+        prompt = template.format(
+            task_description=task_description,
+            clips_summary=clips_summary
+        )
+        
+        # Evaluate with all models in parallel
+        tasks = []
+        for client in self.llm_clients:
+            task = asyncio.create_task(client.evaluate_clip(prompt, self.multi_model_config.max_tokens))
+            tasks.append(task)
+        
+        # Wait for all evaluations to complete
+        evaluations = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        model_evaluations = {}
+        successful_evaluations = []
+        
+        for i, evaluation in enumerate(evaluations):
+            client = self.llm_clients[i]
+            model_key = f"{client.provider_name}_{client.model_name}"
+            
+            if isinstance(evaluation, Exception):
+                logger.error(f"Category evaluation failed for {model_key}: {evaluation}")
+                model_evaluations[model_key] = EvaluationResponse(
+                    scores={}, summary="", reasoning="", success=False, 
+                    error_message=str(evaluation), model_name=client.model_name, provider=client.provider_name
+                )
+            else:
+                model_evaluations[model_key] = evaluation
+                if evaluation.success:
+                    successful_evaluations.append(evaluation)
+        
+        # Calculate averaged results
+        if successful_evaluations:
+            # Average the detailed scores
+            averaged_scores = self._average_scores([eval.scores for eval in successful_evaluations])
+            # Concatenate summaries with model names
+            summaries_by_model = {}
+            individual_reasoning = {}
+            for i, eval in enumerate(successful_evaluations):
+                client = self.llm_clients[i] if i < len(self.llm_clients) else None
+                model_key = f"{client.provider_name}_{client.model_name}" if client else f"model_{i}"
+                summaries_by_model[model_key] = eval.summary
+                individual_reasoning[model_key] = eval.reasoning  # Keep reasoning separate
+            averaged_summary = self._concatenate_summaries(summaries_by_model)
+            success = True
+        else:
+            averaged_scores = {}
+            averaged_summary = "All category evaluations failed"
+            individual_reasoning = {}
+            success = False
+        
+        return MultiModelCategoryEvaluation(
+            category=category,
+            clips=clips,
+            clip_evaluations=clip_evaluations,
+            model_evaluations=model_evaluations,
+            averaged_scores=averaged_scores,
+            averaged_summary=averaged_summary,
+            individual_reasoning=individual_reasoning,
+            success=success,
+            num_successful_models=len(successful_evaluations)
+        )
+    
+    async def evaluate_final_trajectory_with_all_models(self, all_clips: List[Clip], all_clip_evaluations: List[MultiModelClipEvaluation], task_description: str) -> MultiModelCategoryEvaluation:
+        """Evaluate the entire trajectory with all models for final assessment."""
+        
+        # Build complete trajectory summary with ALL clips and their evaluations
+        clips_summary_parts = []
+        for i, (clip, evaluation) in enumerate(zip(all_clips, all_clip_evaluations)):
+            clip_summary = f"Clip {clip.clip_number} ({clip.tool_type}): {evaluation.averaged_summary} (Evaluation: {evaluation.averaged_evaluation})"
+            clips_summary_parts.append(clip_summary)
+        
+        clips_summary = "\n".join(clips_summary_parts)
+        
+        # Use the final category template for complete trajectory evaluation
+        template = PromptTemplates.FINAL_CATEGORY_TEMPLATE
+        prompt = template.format(
+            task_description=task_description,
+            clips_summary=clips_summary
+        )
+        
+        # Evaluate with all models in parallel
+        tasks = []
+        for client in self.llm_clients:
+            task = asyncio.create_task(client.evaluate_clip(prompt, self.multi_model_config.max_tokens))
+            tasks.append(task)
+        
+        # Wait for all evaluations to complete
+        evaluations = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        model_evaluations = {}
+        successful_evaluations = []
+        
+        for i, evaluation in enumerate(evaluations):
+            client = self.llm_clients[i]
+            model_key = f"{client.provider_name}_{client.model_name}"
+            
+            if isinstance(evaluation, Exception):
+                logger.error(f"Final trajectory evaluation failed for {model_key}: {evaluation}")
+                model_evaluations[model_key] = EvaluationResponse(
+                    scores={}, summary="", reasoning="", success=False, 
+                    error_message=str(evaluation), model_name=client.model_name, provider=client.provider_name
+                )
+            else:
+                model_evaluations[model_key] = evaluation
+                if evaluation.success:
+                    successful_evaluations.append(evaluation)
+        
+        # Calculate averaged results for the entire trajectory
+        if successful_evaluations:
+            # Average the detailed scores across all models
+            averaged_scores = self._average_scores([eval.scores for eval in successful_evaluations])
+            # Concatenate summaries with model names
+            summaries_by_model = {}
+            individual_reasoning = {}
+            for i, eval in enumerate(successful_evaluations):
+                client = self.llm_clients[i] if i < len(self.llm_clients) else None
+                model_key = f"{client.provider_name}_{client.model_name}" if client else f"model_{i}"
+                summaries_by_model[model_key] = eval.summary
+                individual_reasoning[model_key] = eval.reasoning  # Keep reasoning separate
+            averaged_summary = self._concatenate_summaries(summaries_by_model)
+            success = True
+        else:
+            averaged_scores = {}
+            averaged_summary = "All final trajectory evaluations failed"
+            individual_reasoning = {}
+            success = False
+        
+        return MultiModelCategoryEvaluation(
+            category="final",
+            clips=all_clips,
+            clip_evaluations=all_clip_evaluations,
+            model_evaluations=model_evaluations,
+            averaged_scores=averaged_scores,
+            averaged_summary=averaged_summary,
+            individual_reasoning=individual_reasoning,
+            success=success,
+            num_successful_models=len(successful_evaluations)
+        )
+    
     def _average_text(self, texts: List[str]) -> str:
         """Create an averaged/combined text from multiple texts."""
         if not texts:
@@ -417,60 +761,213 @@ class MultiModelStepLevelEvaluator:
             return ""
     
     async def evaluate_trajectory_with_full_response(self, trajectory_data: Dict[str, Any], output_dir: str = "data") -> Dict[str, Any]:
-        """Evaluate a trajectory with multi-model approach and return full response with embedded evaluations."""
+        """Evaluate a trajectory with sequential clip and category evaluation."""
         
-        task_description = trajectory_data.get('task_description', 'No task description provided')
-        raw_response = trajectory_data.get('raw_response', '')
+        # Extract task instruction and output from the new data format
+        if 'sft_data' in trajectory_data:
+            task_description = trajectory_data['sft_data'].get('instruction', 'No task description provided')
+            raw_response = trajectory_data['sft_data'].get('output', '')
+        else:
+            # Fallback to old format
+            task_description = trajectory_data.get('task_description', 'No task description provided')
+            raw_response = trajectory_data.get('raw_response', '')
         
         if not raw_response:
             logger.error("No raw_response found in trajectory data")
             return trajectory_data
         
-        logger.info(f"Starting multi-model evaluation for task: {trajectory_data.get('task_id', 'unknown')}")
+        logger.info(f"Starting sequential multi-model evaluation for task: {trajectory_data.get('task_id', 'unknown')}")
         
-        # Extract clips
+        # Extract clips and group by category
         clips = self.extract_clips(raw_response)
         if not clips:
             logger.warning("No clips extracted from trajectory")
             return trajectory_data
         
-        # Evaluate each clip with all models
-        multi_model_evaluations = []
-        for i, clip in enumerate(clips):
-            previous_context = self._build_context_summary(clips, i)
-            
-            logger.info(f"Evaluating clip {i+1}/{len(clips)} ({clip.tool_type}) with {len(self.llm_clients)} models")
-            evaluation = await self.evaluate_clip_with_all_models(clip, task_description, previous_context)
-            multi_model_evaluations.append(evaluation)
+        clip_groups = self._group_clips_by_category(clips)
+        logger.info(f"Grouped {len(clips)} clips into {len(clip_groups)} categories")
         
-        # Save individual model results
+        # Sequential evaluation: clip->clip->category->clip->clip->category->final
+        all_clip_evaluations = []
+        all_category_evaluations = []
+        
+        for group_idx, clip_group in enumerate(clip_groups):
+            category = clip_group[0].tool_type
+            logger.info(f"Evaluating category {group_idx+1}/{len(clip_groups)}: {category} ({len(clip_group)} clips)")
+            
+            # Evaluate each clip in the group
+            group_clip_evaluations = []
+            for clip in clip_group:
+                # Build context from ALL previous clips with their evaluation results
+                previous_context = self._build_context_summary(clips, clip.clip_number - 1, all_clip_evaluations)
+                
+                logger.info(f"  Evaluating clip {clip.clip_number} ({category})")
+                evaluation = await self.evaluate_clip_with_all_models(clip, task_description, previous_context)
+                group_clip_evaluations.append(evaluation)
+                all_clip_evaluations.append(evaluation)
+            
+            # After evaluating all clips in the group, evaluate the category comprehensively
+            if len(clip_group) > 0:  # Should always be true, but safety check
+                logger.info(f"  Evaluating {category} category comprehensively")
+                
+                # Special case: if this is the final clip (last group), evaluate the entire trajectory
+                is_final_group = (group_idx == len(clip_groups) - 1)
+                if is_final_group and clip_group[0].is_final_clip:
+                    # For final trajectory evaluation, include ALL clips, not just the final one
+                    category_evaluation = await self.evaluate_final_trajectory_with_all_models(
+                        clips, all_clip_evaluations, task_description
+                    )
+                else:
+                    category_evaluation = await self.evaluate_category_with_all_models(
+                        category, clip_group, group_clip_evaluations, task_description
+                    )
+                all_category_evaluations.append(category_evaluation)
+        
+        # Save results
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
-        
         task_id = trajectory_data.get('task_id', 'unknown')
         
-        # Save individual model files
-        self._save_individual_model_results(multi_model_evaluations, task_id, output_path)
+        # Save detailed results
+        self._save_comprehensive_results(all_clip_evaluations, all_category_evaluations, task_id, output_path)
         
-        # Create full response with embedded averaged evaluations
-        full_response_with_evaluations = self._insert_averaged_evaluations(raw_response, multi_model_evaluations)
-        
-        # Calculate overall averaged metrics
-        overall_metrics = self._calculate_overall_averaged_metrics(multi_model_evaluations)
-        
-        # Update trajectory data with averaged results
+        # Create tool_call_statistics with both clip and category evaluations
         result = trajectory_data.copy()
-        result['full_response_with_evaluation'] = full_response_with_evaluations
-        result['evaluation_metadata'] = {
-            'num_clips': len(clips),
-            'num_models': len(self.llm_clients),
-            'model_names': [f"{client.provider_name}_{client.model_name}" for client in self.llm_clients],
-            **overall_metrics
-        }
+        if 'tool_call_statistics' not in result:
+            result['tool_call_statistics'] = {}
         
-        logger.info(f"Multi-model evaluation completed: {overall_metrics.get('successful_evaluations', 0)}/{len(clips)} clips successful")
+        # Add clip evaluations
+        clip_evaluations = []
+        for evaluation in all_clip_evaluations:
+            clip_eval = {
+                'clip_number': evaluation.clip.clip_number,
+                'tool_category': evaluation.clip.tool_type,
+                'tools_used': evaluation.clip.tool_calls,
+                'evaluation': evaluation.averaged_evaluation,
+                'summary': evaluation.averaged_summary,
+                'is_final_clip': evaluation.clip.is_final_clip
+            }
+            clip_evaluations.append(clip_eval)
+        
+        # Add category evaluations
+        category_evaluations = []
+        for evaluation in all_category_evaluations:
+            category_eval = {
+                'category': evaluation.category,
+                'clips_in_category': [c.clip_number for c in evaluation.clips],
+                'averaged_scores': evaluation.averaged_scores,
+                'summary': evaluation.averaged_summary,
+                'individual_reasoning': evaluation.individual_reasoning
+            }
+            category_evaluations.append(category_eval)
+        
+        # Calculate overall statistics
+        evaluations_only = [eval.averaged_evaluation for eval in all_clip_evaluations if eval.success]
+        evaluation_counts = {'good': 0, 'normal': 0, 'bad': 0}
+        for eval_result in evaluations_only:
+            evaluation_counts[eval_result] = evaluation_counts.get(eval_result, 0) + 1
+        
+        result['tool_call_statistics'].update({
+            'clip_evaluations': clip_evaluations,
+            'category_evaluations': category_evaluations,
+            'evaluation_summary': {
+                'total_clips': len(clips),
+                'total_categories': len(all_category_evaluations),
+                'successful_clip_evaluations': len(evaluations_only),
+                'successful_category_evaluations': len([e for e in all_category_evaluations if e.success]),
+                'evaluation_counts': evaluation_counts,
+                'num_models_used': len(self.llm_clients),
+                'model_names': [f"{client.provider_name}_{client.model_name}" for client in self.llm_clients]
+            }
+        })
+        
+        logger.info(f"Sequential evaluation completed: {len(evaluations_only)}/{len(clips)} clips, {len([e for e in all_category_evaluations if e.success])}/{len(all_category_evaluations)} categories")
         
         return result
+    
+    def _save_comprehensive_results(self, clip_evaluations: List[MultiModelClipEvaluation], category_evaluations: List[MultiModelCategoryEvaluation], task_id: str, output_dir: Path):
+        """Save comprehensive evaluation results with both clips and categories."""
+        
+        # Create comprehensive structure
+        comprehensive_data = {
+            'task_id': task_id,
+            'evaluation_metadata': {
+                'total_clips': len(clip_evaluations),
+                'total_categories': len(category_evaluations),
+                'total_models': len(self.llm_clients),
+                'model_names': [f"{client.provider_name}_{client.model_name}" for client in self.llm_clients],
+                'successful_clips': sum(1 for eval in clip_evaluations if eval.success),
+                'successful_categories': sum(1 for eval in category_evaluations if eval.success),
+                'evaluation_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            },
+            'clip_evaluations': [],
+            'category_evaluations': []
+        }
+        
+        # Process clip evaluations
+        for clip_eval in clip_evaluations:
+            clip_data = {
+                'clip_number': clip_eval.clip.clip_number,
+                'tool_category': clip_eval.clip.tool_type,
+                'is_final_clip': clip_eval.clip.is_final_clip,
+                'tools_used': clip_eval.clip.tool_calls,
+                'averaged_results': {
+                    'evaluation': clip_eval.averaged_evaluation,
+                    'summary': clip_eval.averaged_summary,
+                    'success': clip_eval.success
+                },
+                'individual_model_results': {}
+            }
+            
+            # Add individual model results for clips
+            for model_key, model_eval in clip_eval.model_evaluations.items():
+                clip_data['individual_model_results'][model_key] = {
+                    'evaluation': model_eval.scores.get('evaluation', 'normal') if model_eval.scores else 'normal',
+                    'summary': model_eval.summary,
+                    'success': model_eval.success,
+                    'error_message': model_eval.error_message if not model_eval.success else None
+                }
+            
+            comprehensive_data['clip_evaluations'].append(clip_data)
+        
+        # Process category evaluations
+        for cat_eval in category_evaluations:
+            category_data = {
+                'category': cat_eval.category,
+                'clips_in_category': [c.clip_number for c in cat_eval.clips],
+                'averaged_results': {
+                    'scores': cat_eval.averaged_scores,
+                    'summary': cat_eval.averaged_summary,
+                    'success': cat_eval.success
+                },
+                'individual_model_results': {}
+            }
+            
+            # Add individual model results for categories
+            for model_key, model_eval in cat_eval.model_evaluations.items():
+                category_data['individual_model_results'][model_key] = {
+                    'scores': model_eval.scores,
+                    'summary': model_eval.summary,
+                    'reasoning': model_eval.reasoning,
+                    'success': model_eval.success,
+                    'error_message': model_eval.error_message if not model_eval.success else None
+                }
+            
+            comprehensive_data['category_evaluations'].append(category_data)
+        
+        # Save comprehensive file
+        filename = f"comprehensive_{task_id}_evaluation.json"
+        filepath = output_dir / filename
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(comprehensive_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f" Saved comprehensive evaluation: {filepath}")
+            logger.info(f"    {len(clip_evaluations)} clips, {len(category_evaluations)} categories, {len(self.llm_clients)} models")
+            
+        except Exception as e:
+            logger.error(f" Failed to save comprehensive results: {e}")
     
     def _save_individual_model_results(self, evaluations: List[MultiModelClipEvaluation], task_id: str, output_dir: Path):
         """Save consolidated multi-model evaluation results to a single JSON file per task."""
@@ -495,20 +992,21 @@ class MultiModelStepLevelEvaluator:
                 'input': {
                     'tool_type': evaluation.clip.tool_type,
                     'clip_content': evaluation.clip.content,
-                    'has_tool_call': evaluation.clip.has_tool_call,
-                    'tool_call_content': evaluation.clip.tool_call_content,
+                    'clip_number': evaluation.clip.clip_number,
+                    'is_final_clip': evaluation.clip.is_final_clip,
+                    'think_content': evaluation.clip.think_content,
                     'result_content': evaluation.clip.result_content,
+                    'sub_task_think_content': evaluation.clip.sub_task_think_content,
+                    'tool_calls': evaluation.clip.tool_calls,
                     'start_index': evaluation.clip.start_index,
                     'end_index': evaluation.clip.end_index,
-                    'prompt_length': len(str(evaluation.clip.content)),
-                    'applicable_metrics': evaluation.tool_metrics
+                    'prompt_length': len(str(evaluation.clip.content))
                 },
                 'model_outputs': {},
                 'averaged_results': {
                     'success': evaluation.success,
-                    'scores': evaluation.averaged_scores,
+                    'evaluation': evaluation.averaged_evaluation,
                     'summary': evaluation.averaged_summary,
-                    'reasoning': evaluation.averaged_reasoning,
                     'successful_models': evaluation.num_successful_models,
                     'total_models': len(evaluation.model_evaluations)
                 }
@@ -518,9 +1016,8 @@ class MultiModelStepLevelEvaluator:
             for model_key, model_eval in evaluation.model_evaluations.items():
                 clip_data['model_outputs'][model_key] = {
                     'success': model_eval.success,
-                    'scores': model_eval.scores,
+                    'evaluation': model_eval.scores.get('evaluation', 'normal') if model_eval.scores else 'normal',
                     'summary': model_eval.summary,
-                    'reasoning': model_eval.reasoning,
                     'model_name': model_eval.model_name,
                     'provider': model_eval.provider,
                     'raw_response': model_eval.raw_response,
@@ -529,40 +1026,32 @@ class MultiModelStepLevelEvaluator:
             
             consolidated_data['clip_evaluations'].append(clip_data)
         
-        # Calculate overall task-level averaged scores
-        all_successful_scores = []
+        # Calculate overall task-level evaluation statistics
+        all_successful_evaluations = []
         for evaluation in evaluations:
-            if evaluation.success and evaluation.averaged_scores:
-                all_successful_scores.append(evaluation.averaged_scores)
+            if evaluation.success:
+                all_successful_evaluations.append(evaluation.averaged_evaluation)
         
-        if all_successful_scores:
-            # Calculate task-level averages
-            task_averaged_scores = self._average_scores(all_successful_scores)
+        if all_successful_evaluations:
+            # Calculate evaluation distribution
+            from collections import Counter
+            eval_counts = Counter(all_successful_evaluations)
             
-            # Calculate score statistics (min, max, std) for each metric
-            score_statistics = {}
-            for metric in task_averaged_scores.keys():
-                metric_values = [scores.get(metric, 0.0) for scores in all_successful_scores if metric in scores]
-                if metric_values:
-                    score_statistics[metric] = {
-                        'average': task_averaged_scores[metric],
-                        'min': min(metric_values),
-                        'max': max(metric_values),
-                        'std': statistics.stdev(metric_values) if len(metric_values) > 1 else 0.0,
-                        'count': len(metric_values)
-                    }
-            
-            consolidated_data['task_level_averages'] = {
-                'overall_scores': task_averaged_scores,
-                'score_statistics': score_statistics,
-                'successful_clips_ratio': len(all_successful_scores) / len(evaluations) if evaluations else 0.0
+            consolidated_data['task_level_summary'] = {
+                'evaluation_distribution': dict(eval_counts),
+                'total_successful_clips': len(all_successful_evaluations),
+                'total_clips': len(evaluations),
+                'success_ratio': len(all_successful_evaluations) / len(evaluations) if evaluations else 0.0,
+                'overall_quality': max(eval_counts.items(), key=lambda x: x[1])[0] if eval_counts else 'normal'
             }
         else:
-            consolidated_data['task_level_averages'] = {
-                'overall_scores': {},
-                'score_statistics': {},
-                'successful_clips_ratio': 0.0,
-                'note': 'No successful evaluations for averaging'
+            consolidated_data['task_level_summary'] = {
+                'evaluation_distribution': {'good': 0, 'normal': 0, 'bad': 0},
+                'total_successful_clips': 0,
+                'total_clips': len(evaluations),
+                'success_ratio': 0.0,
+                'overall_quality': 'bad',
+                'note': 'No successful evaluations'
             }
         
         # Save consolidated file
@@ -574,13 +1063,14 @@ class MultiModelStepLevelEvaluator:
                 json.dump(consolidated_data, f, indent=2, ensure_ascii=False)
             
             logger.info(f" Saved consolidated multi-model evaluation: {filepath}")
-            logger.info(f"    {len(evaluations)} clips, {len(self.llm_clients)} models, {len(all_successful_scores)} successful clip evaluations")
+            logger.info(f"    {len(evaluations)} clips, {len(self.llm_clients)} models, {len(all_successful_evaluations)} successful clip evaluations")
             
-            # Log task-level average scores
-            if consolidated_data['task_level_averages']['overall_scores']:
-                avg_scores = consolidated_data['task_level_averages']['overall_scores']
-                score_summary = ", ".join([f"{k}: {v:.3f}" for k, v in list(avg_scores.items())[:3]])
-                logger.info(f"    Task average scores: {score_summary}{'...' if len(avg_scores) > 3 else ''}")
+            # Log task-level summary
+            if consolidated_data['task_level_summary']['evaluation_distribution']:
+                eval_dist = consolidated_data['task_level_summary']['evaluation_distribution']
+                dist_summary = ", ".join([f"{k}: {v}" for k, v in eval_dist.items() if v > 0])
+                overall_quality = consolidated_data['task_level_summary']['overall_quality']
+                logger.info(f"    Task evaluation distribution: {dist_summary}, overall: {overall_quality}")
             
         except Exception as e:
             logger.error(f" Failed to save consolidated model results: {e}")
@@ -600,86 +1090,9 @@ class MultiModelStepLevelEvaluator:
             except:
                 logger.error(f" Complete failure to save any results for task {task_id}")
     
-    def _insert_averaged_evaluations(self, raw_response: str, evaluations: List[MultiModelClipEvaluation]) -> str:
-        """Insert averaged evaluation results into the raw response."""
-        response_with_eval = raw_response
-        offset = 0
-        
-        for evaluation in evaluations:
-            if not evaluation.success:
-                continue
-                
-            clip = evaluation.clip
-            
-            # Create evaluation XML
-            eval_xml = f"""
-<clip_evaluation>
-<scores>
-{json.dumps(evaluation.averaged_scores, indent=2)}
-</scores>
-<summary>{evaluation.averaged_summary}</summary>
-<reasoning>{evaluation.averaged_reasoning}</reasoning>
-<model_info>Averaged from {evaluation.num_successful_models} models</model_info>
-</clip_evaluation>
-"""
-            
-            # Insert after the clip's end position
-            insert_position = clip.end_index + offset
-            response_with_eval = (
-                response_with_eval[:insert_position] + 
-                eval_xml + 
-                response_with_eval[insert_position:]
-            )
-            offset += len(eval_xml)
-        
-        return response_with_eval
+
     
-    def _calculate_overall_averaged_metrics(self, evaluations: List[MultiModelClipEvaluation]) -> Dict[str, Any]:
-        """Calculate overall averaged metrics from multi-model evaluations."""
-        total_clips = len(evaluations)
-        successful_clips = sum(1 for eval in evaluations if eval.success)
-        
-        # Group scores by tool type
-        tool_scores = defaultdict(list)
-        for evaluation in evaluations:
-            if evaluation.success:
-                tool_scores[evaluation.clip.tool_type].append(evaluation.averaged_scores)
-        
-        # Calculate tool averages
-        tool_averages = {}
-        for tool_type, scores_list in tool_scores.items():
-            if scores_list:
-                averaged_tool_scores = self._average_scores(scores_list)
-                overall_avg = statistics.mean(averaged_tool_scores.values()) if averaged_tool_scores else 0.0
-                
-                tool_averages[tool_type] = {
-                    'average_scores': averaged_tool_scores,
-                    'clip_count': len(scores_list),
-                    'overall_average': overall_avg
-                }
-        
-        # Calculate weighted overall score
-        total_weight = 0
-        weighted_sum = 0
-        
-        for tool_type, metrics in tool_averages.items():
-            clip_count = metrics['clip_count']
-            avg_score = metrics['overall_average']
-            
-            # Weight by number of clips
-            weight = clip_count
-            weighted_sum += avg_score * weight
-            total_weight += weight
-        
-        overall_score = weighted_sum / total_weight if total_weight > 0 else 0.0
-        
-        return {
-            'total_clips': total_clips,
-            'successful_evaluations': successful_clips,
-            'success_rate': successful_clips / total_clips if total_clips > 0 else 0.0,
-            'overall_trajectory_score': overall_score,
-            'tool_averages': tool_averages
-        }
+
 
 
 # Backward compatibility - single model evaluator

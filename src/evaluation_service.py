@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Evaluation Service
-==================
+Evaluation Service Core Module
+===============================
 
-This script provides a complete evaluation service for AI agent trajectory data.
-It integrates preprocessing and step-level evaluation with LLM APIs.
+This module provides the core EvaluationService class for AI agent trajectory evaluation.
+It handles data loading, preprocessing, and orchestrates the evaluation process with LLM APIs.
 
 Features:
 - Separate preprocessing and evaluation modes
@@ -13,25 +13,12 @@ Features:
 - Batch processing with rate limiting
 - Comprehensive reporting and statistics
 
-Usage:
-    # Preprocessing only
-    python src/evaluation_service.py --input data/demo01.jsonl --preprocess-only --output data/preprocessed.jsonl
-    
-    # Single-model LLM evaluation
-    python src/evaluation_service.py --input data/preprocessed.jsonl --provider openai --api-key YOUR_KEY --output data/results.jsonl
-    
-    # Multi-model evaluation
-    python src/evaluation_service.py --input data/preprocessed.jsonl --multi-model --output data/results.jsonl
-    
-    # Full pipeline (preprocess + evaluate)
-    python src/evaluation_service.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --output data/results.jsonl
+Note: Main execution logic and command-line interface are in run_evaluation.py
 """
 
 import asyncio
-import argparse
 import logging
 import json
-import os
 import time
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -258,16 +245,12 @@ class EvaluationService:
                 for sample in processed_data:
                     # Create clean output with only the required fields
                     if not self.preprocess_only:
-                        # For evaluation modes, only keep essential fields
+                        # For evaluation modes, keep essential fields for new format
                         clean_sample = {
-                            'timestamp': sample.get('timestamp'),
                             'task_id': sample.get('task_id'),
-                            'task_description': sample.get('task_description'),
-                            'duration': sample.get('duration'),
-                            'success': sample.get('success'),
-                            'final_result': sample.get('final_result'),
-                            'full_response_with_evaluation': sample.get('full_response_with_evaluation'),
-                            'evaluation_metadata': sample.get('evaluation_metadata')
+                            'sft_data': sample.get('sft_data'),
+                            'conversations': sample.get('conversations'),
+                            'tool_call_statistics': sample.get('tool_call_statistics')
                         }
                         
                         # Remove None values
@@ -335,290 +318,5 @@ class EvaluationService:
         print("="*60)
 
 
-async def main():
-    """Main function for running the evaluation service."""
-    parser = argparse.ArgumentParser(
-        description='AI Agent Trajectory Evaluation Service',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    
-    # Input/Output arguments
-    parser.add_argument('--input', '-i', type=str, required=True,
-                       help='Input JSONL file or directory path')
-    parser.add_argument('--output', '-o', type=str, default='data/demo01_eva.jsonl',
-                       help='Output file path for results')
-    
-    # Processing mode
-    parser.add_argument('--preprocess-only', action='store_true',
-                       help='Only run preprocessing, skip evaluation')
-    parser.add_argument('--full-pipeline', action='store_true',
-                       help='Run full pipeline: preprocess + evaluate')
-    parser.add_argument('--multi-model', action='store_true',
-                       help='Use multi-model evaluation (interactive configuration)')
-    
-    # Single model API configuration
-    parser.add_argument('--provider', type=str, default='openai',
-                       choices=['openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai',
-                               'openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks'],
-                       help='LLM provider for single-model evaluation')
-    parser.add_argument('--api-key', type=str, default='',
-                       help='API key for single-model evaluation')
-    parser.add_argument('--model', type=str, default=None,
-                       help='Model name for single-model evaluation')
-    
-    # Processing configuration
-    parser.add_argument('--batch-size', type=int, default=3,
-                       help='Number of concurrent evaluations')
-    parser.add_argument('--rate-limit', type=float, default=1.0,
-                       help='Delay between API requests in seconds')
-    parser.add_argument('--beta-threshold', type=int, default=15,
-                       help='Maximum tool calls per sample in preprocessing')
-    
-    # Logging
-    parser.add_argument('--verbose', '-v', action='store_true',
-                       help='Enable verbose logging')
-    parser.add_argument('--quiet', '-q', action='store_true',
-                       help='Suppress progress output')
-    
-    args = parser.parse_args()
-    
-    # Configure logging
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    elif args.quiet:
-        logging.getLogger().setLevel(logging.WARNING)
-    
-    # Multi-model configuration
-    model_configs = []
-    if args.multi_model and not args.preprocess_only:
-        model_configs = configure_multi_model()
-        if not model_configs:
-            logger.error("No models configured for multi-model evaluation")
-            return
-    
-    try:
-        # Initialize service
-        service = EvaluationService(
-            provider=args.provider,
-            api_key=args.api_key,
-            model_name=args.model,
-            batch_size=args.batch_size,
-            rate_limit_delay=args.rate_limit,
-            preprocess_only=args.preprocess_only,
-            full_pipeline=args.full_pipeline,
-            beta_threshold=args.beta_threshold,
-            multi_model=args.multi_model,
-            model_configs=model_configs
-        )
-        
-        # Load and process data
-        data = service.load_data(args.input)
-        if not data:
-            logger.error("No data loaded")
-            return
-        
-        processed_data = await service.process_data(data)
-        
-        # Save results
-        service.save_results(processed_data, args.output)
-        
-        # Print summary
-        if not args.quiet:
-            service.print_summary()
-            
-    except Exception as e:
-        logger.error(f"Service failed: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
-
-
-def configure_multi_model() -> List[ModelConfig]:
-    """Interactive configuration for multi-model evaluation."""
-    print("\n" + "="*60)
-    print("MULTI-MODEL EVALUATION CONFIGURATION")
-    print("="*60)
-    print("Configure multiple LLM models for evaluation.")
-    print()
-    print("Available providers:")
-    print("  • Native: openai, google, anthropic, deepseek, kimi, vertex_ai")
-    print("  • Third-party: openai_compatible, anthropic_compatible, openrouter, together, groq, fireworks")
-    print()
-    print("Instructions:")
-    print("  • You will be prompted to enter information for each model")
-    print("  • Type 'enough' when you're done adding models")
-    print("  • At least one model is required for evaluation")
-    print("="*60)
-    
-    model_configs = []
-    model_number = 1
-    
-    while True:
-        print(f"\n🔧 CONFIGURING MODEL #{model_number}")
-        print("-" * 40)
-        
-        # Get provider
-        while True:
-            print("\nStep 1: Choose Provider")
-            print("Native providers: openai, google, anthropic, deepseek, kimi, vertex_ai")
-            print("Third-party providers: openai_compatible, anthropic_compatible, openrouter, together, groq, fireworks")
-            provider = input(f"Provider for Model #{model_number} (or 'enough' to finish): ").strip().lower()
-            
-            if provider == 'enough':
-                if len(model_configs) == 0:
-                    print("You need to configure at least one model. Please continue.")
-                    continue
-                else:
-                    print(f"Configuration complete with {len(model_configs)} models.")
-                    break
-            
-            supported_providers = [
-                'openai', 'google', 'anthropic', 'deepseek', 'kimi', 'vertex_ai',
-                'openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks'
-            ]
-            
-            if provider in supported_providers:
-                break
-            else:
-                print(f"Invalid provider '{provider}'. Please choose from: {', '.join(supported_providers)}")
-        
-        # Break if user typed 'enough'
-        if provider == 'enough':
-            break
-        
-        # Get API key
-        while True:
-            print(f"\nStep 2: API Key")
-            api_key = input(f"API key for {provider}: ").strip()
-            if api_key:
-                break
-            else:
-                print("API key is required. Please enter a valid API key.")
-        
-        # Get model name (with defaults)
-        print(f"\nStep 3: Model Name")
-        defaults = {
-            'openai': 'gpt-4o',
-            'google': 'gemini-1.5-pro',
-            'anthropic': 'claude-3-5-sonnet-20241022',
-            'deepseek': 'deepseek-chat',
-            'kimi': 'moonshot-v1-8k',
-            'vertex_ai': 'gemini-1.5-pro',
-            'openai_compatible': 'gpt-4',
-            'anthropic_compatible': 'claude-3-sonnet',
-            'openrouter': 'gpt-4',
-            'together': 'meta-llama/Llama-2-70b-chat-hf',
-            'groq': 'llama2-70b-4096',
-            'fireworks': 'accounts/fireworks/models/llama-v2-70b-chat'
-        }
-        
-        default_model = defaults.get(provider, 'default-model')
-        model_name = input(f"Model name (default: {default_model}): ").strip() or default_model
-        
-        # Additional configuration for specific providers
-        endpoint_url = None
-        base_url = None
-        project_id = None
-        protocol = None
-        custom_headers = None
-        
-        # Third-party providers need base_url
-        if provider in ['openai_compatible', 'anthropic_compatible', 'openrouter', 'together', 'groq', 'fireworks']:
-            print(f"\nStep 4: Base URL (Required for {provider})")
-            while True:
-                base_url = input(f"Base URL for {provider}: ").strip()
-                if base_url:
-                    break
-                else:
-                    print("Base URL is required for third-party providers.")
-            
-            # Ask for custom headers (optional)
-            print(f"\nStep 5: Custom Headers (Optional)")
-            print("Some third-party services require custom headers (e.g., x-foo: true)")
-            headers_input = input("Custom headers in format 'key1:value1,key2:value2' (press Enter to skip): ").strip()
-            if headers_input:
-                try:
-                    custom_headers = {}
-                    for header_pair in headers_input.split(','):
-                        key, value = header_pair.split(':')
-                        custom_headers[key.strip()] = value.strip()
-                    print(f"Custom headers set: {custom_headers}")
-                except Exception as e:
-                    print(f" Invalid header format, skipping: {e}")
-            
-            # Set protocol based on provider
-            if provider in ['openai_compatible', 'openrouter', 'together', 'groq', 'fireworks']:
-                protocol = 'openai'
-            elif provider == 'anthropic_compatible':
-                protocol = 'anthropic'
-        
-        # Native providers that might need endpoint URL
-        elif provider in ['deepseek', 'kimi']:
-            print(f"\nStep 4: Endpoint URL (Optional)")
-            endpoint_url = input(f"Endpoint URL for {provider} (press Enter for default): ").strip() or None
-        
-        # Vertex AI specific
-        elif provider == 'vertex_ai':
-            print(f"\nStep 4: Google Cloud Configuration")
-            while True:
-                project_id = input("Google Cloud Project ID: ").strip()
-                if project_id:
-                    break
-                else:
-                    print("Project ID is required for Vertex AI.")
-        
-        # Create model config
-        try:
-            config = ModelConfig(
-                provider=provider,
-                model_name=model_name,
-                api_key=api_key,
-                endpoint_url=endpoint_url,
-                project_id=project_id,
-                base_url=base_url,
-                protocol=protocol,
-                custom_headers=custom_headers
-            )
-            
-            model_configs.append(config)
-            print(f"\nSuccessfully added Model #{model_number}:")
-            print(f"   Provider: {provider}")
-            print(f"   Model: {model_name}")
-            if base_url:
-                print(f"   Base URL: {base_url}")
-            if project_id:
-                print(f"   Project ID: {project_id}")
-            
-            model_number += 1
-            
-            # Limit to prevent too many models
-            if len(model_configs) >= 5:
-                print(f"\n Maximum of 5 models reached. Configuration complete.")
-                break
-                
-        except Exception as e:
-            print(f"Error creating model configuration: {e}")
-            print("Please try again with different settings.")
-            continue
-    
-    # Summary
-    print("\n" + "="*60)
-    print("CONFIGURATION SUMMARY")
-    print("="*60)
-    if model_configs:
-        print(f"Successfully configured {len(model_configs)} models:")
-        for i, config in enumerate(model_configs, 1):
-            display_name = f"{config.provider}: {config.model_name}"
-            if config.base_url:
-                display_name += f" (URL: {config.base_url})"
-            print(f"   {i}. {display_name}")
-        print(f"\nThese models will be used for step-level evaluation.")
-    else:
-        print("No models configured.")
-    
-    print("="*60)
-    return model_configs
-
-
-if __name__ == "__main__":
-    asyncio.run(main()) 
+# Note: Main execution logic moved to run_evaluation.py
+# This file now contains only the core EvaluationService class 

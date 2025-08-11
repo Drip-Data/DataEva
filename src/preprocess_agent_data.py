@@ -237,11 +237,16 @@ class AgentDataPreprocessor:
         Returns:
             Tuple of (is_valid, processed_sample)
         """
-        if 'raw_response' not in sample:
-            logger.warning(f"Sample {sample.get('task_id', 'unknown')} missing raw_response field")
-            return False, sample
+        # Handle new data format
+        raw_response = None
+        if 'sft_data' in sample and 'output' in sample['sft_data']:
+            raw_response = sample['sft_data']['output']
+        elif 'raw_response' in sample:
+            raw_response = sample['raw_response']
         
-        raw_response = sample['raw_response']
+        if not raw_response:
+            logger.warning(f"Sample {sample.get('task_id', 'unknown')} missing output/raw_response field")
+            return False, sample
         
         # Step 1: Extract XML tags and content
         tag_content = self.extract_xml_tags(raw_response)
@@ -262,7 +267,11 @@ class AgentDataPreprocessor:
         # Step 4: Format Normalization
         is_valid_format, corrected_response = self.validate_xml_format(raw_response)
         if not is_valid_format:
-            sample['raw_response'] = corrected_response
+            # Update the corrected response in the appropriate field
+            if 'sft_data' in sample and 'output' in sample['sft_data']:
+                sample['sft_data']['output'] = corrected_response
+            else:
+                sample['raw_response'] = corrected_response
             sample['preprocessing_notes'] = 'Format issues detected and corrected'
             self.stats['format_issues_fixed'] += 1
             logger.debug(f"Sample {sample.get('task_id', 'unknown')} format issues fixed")
