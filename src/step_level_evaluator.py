@@ -836,7 +836,7 @@ class MultiModelStepLevelEvaluator:
         if 'tool_call_statistics' not in result:
             result['tool_call_statistics'] = {}
         
-        # Add clip evaluations
+        # Add clip evaluations (streamlined for eva.jsonl - detailed summaries saved separately in model_evaluations)
         clip_evaluations = []
         for evaluation in all_clip_evaluations:
             clip_eval = {
@@ -844,20 +844,17 @@ class MultiModelStepLevelEvaluator:
                 'tool_category': evaluation.clip.tool_type,
                 'tools_used': evaluation.clip.tool_calls,
                 'evaluation': evaluation.averaged_evaluation,
-                'summary': evaluation.averaged_summary,
                 'is_final_clip': evaluation.clip.is_final_clip
             }
             clip_evaluations.append(clip_eval)
         
-        # Add category evaluations
+        # Add category evaluations (streamlined for eva.jsonl - detailed summaries saved separately in model_evaluations)
         category_evaluations = []
         for evaluation in all_category_evaluations:
             category_eval = {
                 'category': evaluation.category,
                 'clips_in_category': [c.clip_number for c in evaluation.clips],
-                'averaged_scores': evaluation.averaged_scores,
-                'summary': evaluation.averaged_summary,
-                'individual_reasoning': evaluation.individual_reasoning
+                'averaged_scores': evaluation.averaged_scores
             }
             category_evaluations.append(category_eval)
         

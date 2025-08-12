@@ -120,9 +120,9 @@ Examples:
                        help='Specific model name to use (provider default if not specified)')
     
     # Processing configuration
-    parser.add_argument('--batch-size', type=int, default=3,
+    parser.add_argument('--batch-size', type=int, default=1,
                        help='Number of concurrent evaluations (default: 3)')
-    parser.add_argument('--rate-limit', type=float, default=1.0,
+    parser.add_argument('--rate-limit', type=float, default=3.0,
                        help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--beta-threshold', type=int, default=15,
                        help='Maximum tool calls per sample in preprocessing (default: 15)')
