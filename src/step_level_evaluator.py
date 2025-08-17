@@ -33,7 +33,7 @@ class Clip:
 class ClipEvaluation:
     """Evaluation result for a single clip."""
     clip: Clip
-    evaluation: str  # good/normal/bad
+    score: float  # 0.0-1.0 score
     summary: str  # One-sentence summary of what was done in the clip
     success: bool
 
@@ -43,7 +43,8 @@ class MultiModelClipEvaluation:
     """Evaluation result from multiple models for a single clip."""
     clip: Clip
     model_evaluations: Dict[str, EvaluationResponse]  # model_name -> evaluation
-    averaged_evaluation: str  # good/normal/bad (majority vote)
+    averaged_score: float  # Average score (0.0-1.0) - reasonableness_score or correctness_score
+    score_type: str  # Type of score: "reasonableness_score" or "correctness_score"
     averaged_summary: str  # Combined summary
     success: bool
     num_successful_models: int
@@ -126,21 +127,24 @@ Content:
 
 Please evaluate this clip and provide your assessment in the following JSON format:
 {{
-    "evaluation": "good",  // Must be exactly one of: "good", "normal", "bad"
+    "reasonableness_score": 0.85,  // Score from 0.0 to 1.0 indicating how reasonable this clip is
     "summary": "Detailed summary of what was done in this clip: the thinking process, which specific tools were called with what parameters, the results obtained, and how they contribute to solving the task. This summary will be used for subsequent evaluations so include important context and details."
 }}
 
-Evaluation Guidelines:
-- "good": The clip shows effective tool usage, clear reasoning, and achieves its intended purpose
-- "normal": The clip shows adequate tool usage with minor issues or inefficiencies  
-- "bad": The clip shows poor tool usage, unclear reasoning, or fails to achieve its purpose
+Evaluation Guidelines for Reasonableness Score (0.0 - 1.0):
+- 0.8-1.0: Excellent reasoning, optimal tool selection, clear logic, effective results
+- 0.6-0.8: Good reasoning with minor issues, appropriate tool usage, mostly effective
+- 0.4-0.6: Adequate reasoning but with notable issues, suboptimal but acceptable approach
+- 0.2-0.4: Poor reasoning, questionable tool selection, limited effectiveness
+- 0.0-0.2: Very poor reasoning, inappropriate tools, ineffective or counterproductive
 
 Focus on:
-1. Appropriateness of tool selection for the task
-2. Quality of reasoning in the <think> section
-3. Effectiveness of tool usage and result interpretation
-4. Contribution to overall task progress
-5. How this clip builds upon previous clips' work
+1. Quality of reasoning in the <think> section - is the logic clear and sound?
+2. Appropriateness of tool selection for the specific task requirements
+3. Effectiveness of tool invocation - are parameters reasonable and well-chosen?
+4. Quality and usefulness of results obtained from the <result> section
+5. How well this clip builds upon and integrates with previous clips' work
+6. Overall contribution to task progress and problem-solving
 """
 
     FINAL_CLIP_TEMPLATE = """
@@ -154,21 +158,29 @@ Final Clip:
 Content:
 {clip_content}
 
+Ground Truth Answer: {ground_truth_answer}
+Model Output Answer: {model_output_answer}
+
 Please evaluate this final clip and provide your assessment in the following JSON format:
 {{
-    "evaluation": "good",  // Must be exactly one of: "good", "normal", "bad"
-    "summary": "Detailed summary of the final answer: what conclusion was reached, how it addresses the original task, the quality and accuracy of the answer, and overall task completion status."
+    "correctness_score": 0.95,  // Score from 0.0 to 1.0 indicating answer correctness
+    "summary": "Detailed summary of the final answer: what conclusion was reached, how it addresses the original task, comparison with ground truth, and overall task completion status."
 }}
 
-Evaluation Guidelines:
-- "good": The final answer is complete, accurate, and properly addresses the original task
-- "normal": The final answer is adequate but may have minor issues or incompleteness
-- "bad": The final answer is incorrect, incomplete, or doesn't address the task
+Evaluation Guidelines for Correctness Score (0.0 - 1.0):
+- 1.0: Perfect match with ground truth, completely correct answer
+- 0.8-0.9: Mostly correct with minor formatting differences or additional context
+- 0.6-0.8: Correct core answer but with some inaccuracies or incomplete information
+- 0.4-0.6: Partially correct but missing important details or has notable errors
+- 0.2-0.4: Incorrect answer but shows some understanding of the task
+- 0.0-0.2: Completely wrong or nonsensical answer
 
 Focus on:
-1. Correctness and completeness of the final answer
-2. How well it addresses the original task  
-3. Quality of reasoning leading to the conclusion
+1. Exact correctness compared to ground truth answer
+2. Completeness and accuracy of the final answer
+3. How well the answer addresses the original task requirements
+4. Quality of reasoning that led to the conclusion
+5. Whether the answer format is appropriate and clear
 """
 
     # Category-specific comprehensive evaluation templates
@@ -284,11 +296,15 @@ Task Description: {task_description}
 Complete trajectory with all clip summaries and evaluations:
 {clips_summary}
 
+Ground Truth Answer: {ground_truth_answer}
+Model Final Result: {model_final_result}
+
 Please evaluate the overall trajectory comprehensively using these metrics:
 1. Task Completion (0.0-1.0): How completely is the task addressed?
 2. Tool use quality (0.0-1.0): Is the sequence of tool use logical and efficient?
 3. Reasoning Coherence (0.0-1.0): How logical and coherent is the overall reasoning chain?
 4. Problem Resolution (0.0-1.0): How effectively are any encountered problems resolved?
+5. Answer Correctness (0.0-1.0): How accurate is the final answer compared to ground truth?
 
 Please provide your evaluation in the following JSON format:
 {{
@@ -296,10 +312,11 @@ Please provide your evaluation in the following JSON format:
         "task_completion": 0.85,
         "tool_use_quality": 0.90,
         "reasoning_coherence": 0.75,
-        "problem_resolution": 0.80
+        "problem_resolution": 0.80,
+        "answer_correctness": 0.95
     }},
-    "summary": "One sentence overall assessment of the complete trajectory performance",
-    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how all the clips and categories work together to complete the task, what was done well throughout the trajectory, what could be improved, and the overall quality of task completion. Provide specific examples from different parts of the trajectory to justify your scoring."
+    "summary": "One sentence overall assessment of the complete trajectory performance including answer accuracy",
+    "reasoning": "Detailed reasoning for each score: explain why you gave each metric its score, how all the clips and categories work together to complete the task, what was done well throughout the trajectory, what could be improved, the accuracy of the final answer compared to ground truth, and the overall quality of task completion. Provide specific examples from different parts of the trajectory to justify your scoring."
 }}
 """
 
@@ -422,11 +439,11 @@ class MultiModelStepLevelEvaluator:
             
             # Include evaluation result if available
             if clip_evaluations and i < len(clip_evaluations):
-                evaluation_result = clip_evaluations[i].averaged_evaluation
+                evaluation_score = clip_evaluations[i].averaged_score
                 summary_text = clip_evaluations[i].averaged_summary
-                summary = f"Clip {clip.clip_number} ({clip.tool_type}): {summary_text} (Evaluation: {evaluation_result})"
+                summary = f"Clip {clip.clip_number} ({clip.tool_type}): {summary_text} (Score: {evaluation_score:.2f})"
             else:
-                summary = f"Clip {clip.clip_number} ({clip.tool_type}): Used {tools_used} (Evaluation: not yet available)"
+                summary = f"Clip {clip.clip_number} ({clip.tool_type}): Used {tools_used} (Score: not yet available)"
             
             summaries.append(summary)
         
@@ -464,7 +481,7 @@ class MultiModelStepLevelEvaluator:
         
         return groups
     
-    async def evaluate_clip_with_all_models(self, clip: Clip, task_description: str, previous_context: str) -> MultiModelClipEvaluation:
+    async def evaluate_clip_with_all_models(self, clip: Clip, task_description: str, previous_context: str, ground_truth_answer: str = "", model_final_result: str = "") -> MultiModelClipEvaluation:
         """Evaluate a single clip using all configured models."""
         # Choose appropriate template based on whether it's the final clip
         if clip.is_final_clip:
@@ -472,7 +489,9 @@ class MultiModelStepLevelEvaluator:
             prompt = template.format(
                 task_description=task_description,
                 previous_context=previous_context,
-                clip_content=clip.content
+                clip_content=clip.content,
+                ground_truth_answer=ground_truth_answer,
+                model_output_answer=model_final_result
             )
         else:
             template = PromptTemplates.BASE_TEMPLATE
@@ -516,8 +535,18 @@ class MultiModelStepLevelEvaluator:
         
         # Calculate averaged evaluation
         if successful_evaluations:
-            # Mode for evaluation (good/normal/bad)
-            averaged_evaluation = self._average_evaluation([eval.scores.get('evaluation', 'normal') for eval in successful_evaluations])
+            # Average numerical scores (reasonableness_score or correctness_score)
+            if clip.is_final_clip:
+                # For final clips, use correctness_score
+                scores = [eval.scores.get('correctness_score', 0.0) for eval in successful_evaluations]
+                averaged_score = statistics.mean(scores) if scores else 0.0
+                score_key = 'correctness_score'
+            else:
+                # For regular clips, use reasonableness_score
+                scores = [eval.scores.get('reasonableness_score', 0.0) for eval in successful_evaluations]
+                averaged_score = statistics.mean(scores) if scores else 0.0
+                score_key = 'reasonableness_score'
+            
             # Concatenate summaries with model names
             summaries_by_model = {}
             for i, eval in enumerate(successful_evaluations):
@@ -527,29 +556,22 @@ class MultiModelStepLevelEvaluator:
             averaged_summary = self._concatenate_summaries(summaries_by_model)
             success = True
         else:
-            averaged_evaluation = "bad"  # Default to bad if all failed
+            averaged_score = 0.0  # Default to 0 if all failed
+            score_key = 'correctness_score' if clip.is_final_clip else 'reasonableness_score'
             averaged_summary = "All model evaluations failed"
             success = False
         
         return MultiModelClipEvaluation(
             clip=clip,
             model_evaluations=model_evaluations,
-            averaged_evaluation=averaged_evaluation,
+            averaged_score=averaged_score,
+            score_type=score_key,
             averaged_summary=averaged_summary,
             success=success,
             num_successful_models=len(successful_evaluations)
         )
     
-    def _average_evaluation(self, evaluations: List[str]) -> str:
-        """Average evaluations using majority vote (mode)."""
-        if not evaluations:
-            return "normal"
-        
-        from collections import Counter
-        counts = Counter(evaluations)
-        # Return the most common evaluation, defaulting to "normal" in case of tie
-        most_common = counts.most_common(1)[0][0] if counts else "normal"
-        return most_common
+
     
     def _concatenate_summaries(self, summaries_by_model: Dict[str, str]) -> str:
         """Concatenate summaries from different models."""
@@ -587,7 +609,7 @@ class MultiModelStepLevelEvaluator:
         # Build clips summary for category evaluation as required: summary + evaluation result for each clip
         clips_summary_parts = []
         for i, (clip, evaluation) in enumerate(zip(clips, clip_evaluations)):
-            clip_summary = f"Clip {clip.clip_number}: {evaluation.averaged_summary} (Evaluation: {evaluation.averaged_evaluation})"
+            clip_summary = f"Clip {clip.clip_number}: {evaluation.averaged_summary} (Score: {evaluation.averaged_score:.2f})"
             clips_summary_parts.append(clip_summary)
         
         clips_summary = "\n".join(clips_summary_parts)
@@ -667,13 +689,13 @@ class MultiModelStepLevelEvaluator:
             num_successful_models=len(successful_evaluations)
         )
     
-    async def evaluate_final_trajectory_with_all_models(self, all_clips: List[Clip], all_clip_evaluations: List[MultiModelClipEvaluation], task_description: str) -> MultiModelCategoryEvaluation:
+    async def evaluate_final_trajectory_with_all_models(self, all_clips: List[Clip], all_clip_evaluations: List[MultiModelClipEvaluation], task_description: str, ground_truth_answer: str = "", model_final_result: str = "") -> MultiModelCategoryEvaluation:
         """Evaluate the entire trajectory with all models for final assessment."""
         
         # Build complete trajectory summary with ALL clips and their evaluations
         clips_summary_parts = []
         for i, (clip, evaluation) in enumerate(zip(all_clips, all_clip_evaluations)):
-            clip_summary = f"Clip {clip.clip_number} ({clip.tool_type}): {evaluation.averaged_summary} (Evaluation: {evaluation.averaged_evaluation})"
+            clip_summary = f"Clip {clip.clip_number} ({clip.tool_type}): {evaluation.averaged_summary} (Score: {evaluation.averaged_score:.2f})"
             clips_summary_parts.append(clip_summary)
         
         clips_summary = "\n".join(clips_summary_parts)
@@ -682,7 +704,9 @@ class MultiModelStepLevelEvaluator:
         template = PromptTemplates.FINAL_CATEGORY_TEMPLATE
         prompt = template.format(
             task_description=task_description,
-            clips_summary=clips_summary
+            clips_summary=clips_summary,
+            ground_truth_answer=ground_truth_answer,
+            model_final_result=model_final_result
         )
         
         # Evaluate with all models in parallel
@@ -763,14 +787,19 @@ class MultiModelStepLevelEvaluator:
     async def evaluate_trajectory_with_full_response(self, trajectory_data: Dict[str, Any], output_dir: str = "data") -> Dict[str, Any]:
         """Evaluate a trajectory with sequential clip and category evaluation."""
         
-        # Extract task instruction and output from the new data format
+        # Extract task instruction, output, and answer from the data format
         if 'sft_data' in trajectory_data:
             task_description = trajectory_data['sft_data'].get('instruction', 'No task description provided')
             raw_response = trajectory_data['sft_data'].get('output', '')
+            model_final_result = trajectory_data['sft_data'].get('final_result', '')
         else:
             # Fallback to old format
             task_description = trajectory_data.get('task_description', 'No task description provided')
             raw_response = trajectory_data.get('raw_response', '')
+            model_final_result = trajectory_data.get('final_result', '')
+        
+        # Extract ground truth answer
+        ground_truth_answer = trajectory_data.get('answer', '')
         
         if not raw_response:
             logger.error("No raw_response found in trajectory data")
@@ -802,7 +831,9 @@ class MultiModelStepLevelEvaluator:
                 previous_context = self._build_context_summary(clips, clip.clip_number - 1, all_clip_evaluations)
                 
                 logger.info(f"  Evaluating clip {clip.clip_number} ({category})")
-                evaluation = await self.evaluate_clip_with_all_models(clip, task_description, previous_context)
+                evaluation = await self.evaluate_clip_with_all_models(
+                    clip, task_description, previous_context, ground_truth_answer, model_final_result
+                )
                 group_clip_evaluations.append(evaluation)
                 all_clip_evaluations.append(evaluation)
             
@@ -815,7 +846,7 @@ class MultiModelStepLevelEvaluator:
                 if is_final_group and clip_group[0].is_final_clip:
                     # For final trajectory evaluation, include ALL clips, not just the final one
                     category_evaluation = await self.evaluate_final_trajectory_with_all_models(
-                        clips, all_clip_evaluations, task_description
+                        clips, all_clip_evaluations, task_description, ground_truth_answer, model_final_result
                     )
                 else:
                     category_evaluation = await self.evaluate_category_with_all_models(
@@ -843,7 +874,8 @@ class MultiModelStepLevelEvaluator:
                 'clip_number': evaluation.clip.clip_number,
                 'tool_category': evaluation.clip.tool_type,
                 'tools_used': evaluation.clip.tool_calls,
-                'evaluation': evaluation.averaged_evaluation,
+                'score': evaluation.averaged_score,
+                'score_type': evaluation.score_type,
                 'is_final_clip': evaluation.clip.is_final_clip
             }
             clip_evaluations.append(clip_eval)
@@ -859,10 +891,15 @@ class MultiModelStepLevelEvaluator:
             category_evaluations.append(category_eval)
         
         # Calculate overall statistics
-        evaluations_only = [eval.averaged_evaluation for eval in all_clip_evaluations if eval.success]
-        evaluation_counts = {'good': 0, 'normal': 0, 'bad': 0}
-        for eval_result in evaluations_only:
-            evaluation_counts[eval_result] = evaluation_counts.get(eval_result, 0) + 1
+        successful_scores = [eval.averaged_score for eval in all_clip_evaluations if eval.success]
+        score_statistics = {}
+        if successful_scores:
+            score_statistics = {
+                'average_score': statistics.mean(successful_scores),
+                'min_score': min(successful_scores),
+                'max_score': max(successful_scores),
+                'median_score': statistics.median(successful_scores)
+            }
         
         result['tool_call_statistics'].update({
             'clip_evaluations': clip_evaluations,
@@ -870,15 +907,15 @@ class MultiModelStepLevelEvaluator:
             'evaluation_summary': {
                 'total_clips': len(clips),
                 'total_categories': len(all_category_evaluations),
-                'successful_clip_evaluations': len(evaluations_only),
+                'successful_clip_evaluations': len(successful_scores),
                 'successful_category_evaluations': len([e for e in all_category_evaluations if e.success]),
-                'evaluation_counts': evaluation_counts,
+                'score_statistics': score_statistics,
                 'num_models_used': len(self.llm_clients),
                 'model_names': [f"{client.provider_name}_{client.model_name}" for client in self.llm_clients]
             }
         })
         
-        logger.info(f"Sequential evaluation completed: {len(evaluations_only)}/{len(clips)} clips, {len([e for e in all_category_evaluations if e.success])}/{len(all_category_evaluations)} categories")
+        logger.info(f"Sequential evaluation completed: {len(successful_scores)}/{len(clips)} clips, {len([e for e in all_category_evaluations if e.success])}/{len(all_category_evaluations)} categories")
         
         return result
     
@@ -909,7 +946,8 @@ class MultiModelStepLevelEvaluator:
                 'is_final_clip': clip_eval.clip.is_final_clip,
                 'tools_used': clip_eval.clip.tool_calls,
                 'averaged_results': {
-                    'evaluation': clip_eval.averaged_evaluation,
+                    'score': clip_eval.averaged_score,
+                    'score_type': clip_eval.score_type,
                     'summary': clip_eval.averaged_summary,
                     'success': clip_eval.success
                 },
@@ -918,8 +956,17 @@ class MultiModelStepLevelEvaluator:
             
             # Add individual model results for clips
             for model_key, model_eval in clip_eval.model_evaluations.items():
+                # Extract the appropriate score based on clip type
+                if clip_eval.clip.is_final_clip:
+                    score = model_eval.scores.get('correctness_score', 0.0) if model_eval.scores else 0.0
+                    score_type = 'correctness_score'
+                else:
+                    score = model_eval.scores.get('reasonableness_score', 0.0) if model_eval.scores else 0.0
+                    score_type = 'reasonableness_score'
+                
                 clip_data['individual_model_results'][model_key] = {
-                    'evaluation': model_eval.scores.get('evaluation', 'normal') if model_eval.scores else 'normal',
+                    'score': score,
+                    'score_type': score_type,
                     'summary': model_eval.summary,
                     'success': model_eval.success,
                     'error_message': model_eval.error_message if not model_eval.success else None
@@ -1002,7 +1049,8 @@ class MultiModelStepLevelEvaluator:
                 'model_outputs': {},
                 'averaged_results': {
                     'success': evaluation.success,
-                    'evaluation': evaluation.averaged_evaluation,
+                    'score': evaluation.averaged_score,
+                    'score_type': evaluation.score_type,
                     'summary': evaluation.averaged_summary,
                     'successful_models': evaluation.num_successful_models,
                     'total_models': len(evaluation.model_evaluations)
@@ -1011,9 +1059,18 @@ class MultiModelStepLevelEvaluator:
             
             # Add individual model outputs
             for model_key, model_eval in evaluation.model_evaluations.items():
+                # Extract the appropriate score based on clip type
+                if evaluation.clip.is_final_clip:
+                    score = model_eval.scores.get('correctness_score', 0.0) if model_eval.scores else 0.0
+                    score_type = 'correctness_score'
+                else:
+                    score = model_eval.scores.get('reasonableness_score', 0.0) if model_eval.scores else 0.0
+                    score_type = 'reasonableness_score'
+                
                 clip_data['model_outputs'][model_key] = {
                     'success': model_eval.success,
-                    'evaluation': model_eval.scores.get('evaluation', 'normal') if model_eval.scores else 'normal',
+                    'score': score,
+                    'score_type': score_type,
                     'summary': model_eval.summary,
                     'model_name': model_eval.model_name,
                     'provider': model_eval.provider,
@@ -1024,30 +1081,39 @@ class MultiModelStepLevelEvaluator:
             consolidated_data['clip_evaluations'].append(clip_data)
         
         # Calculate overall task-level evaluation statistics
-        all_successful_evaluations = []
+        all_successful_scores = []
         for evaluation in evaluations:
             if evaluation.success:
-                all_successful_evaluations.append(evaluation.averaged_evaluation)
+                all_successful_scores.append(evaluation.averaged_score)
         
-        if all_successful_evaluations:
-            # Calculate evaluation distribution
-            from collections import Counter
-            eval_counts = Counter(all_successful_evaluations)
+        if all_successful_scores:
+            # Calculate score statistics
+            import statistics
             
             consolidated_data['task_level_summary'] = {
-                'evaluation_distribution': dict(eval_counts),
-                'total_successful_clips': len(all_successful_evaluations),
+                'score_statistics': {
+                    'average_score': statistics.mean(all_successful_scores),
+                    'min_score': min(all_successful_scores),
+                    'max_score': max(all_successful_scores),
+                    'median_score': statistics.median(all_successful_scores)
+                },
+                'total_successful_clips': len(all_successful_scores),
                 'total_clips': len(evaluations),
-                'success_ratio': len(all_successful_evaluations) / len(evaluations) if evaluations else 0.0,
-                'overall_quality': max(eval_counts.items(), key=lambda x: x[1])[0] if eval_counts else 'normal'
+                'success_ratio': len(all_successful_scores) / len(evaluations) if evaluations else 0.0,
+                'overall_quality_score': statistics.mean(all_successful_scores)
             }
         else:
             consolidated_data['task_level_summary'] = {
-                'evaluation_distribution': {'good': 0, 'normal': 0, 'bad': 0},
+                'score_statistics': {
+                    'average_score': 0.0,
+                    'min_score': 0.0,
+                    'max_score': 0.0,
+                    'median_score': 0.0
+                },
                 'total_successful_clips': 0,
                 'total_clips': len(evaluations),
                 'success_ratio': 0.0,
-                'overall_quality': 'bad',
+                'overall_quality_score': 0.0,
                 'note': 'No successful evaluations'
             }
         
@@ -1060,14 +1126,14 @@ class MultiModelStepLevelEvaluator:
                 json.dump(consolidated_data, f, indent=2, ensure_ascii=False)
             
             logger.info(f" Saved consolidated multi-model evaluation: {filepath}")
-            logger.info(f"    {len(evaluations)} clips, {len(self.llm_clients)} models, {len(all_successful_evaluations)} successful clip evaluations")
+            logger.info(f"    {len(evaluations)} clips, {len(self.llm_clients)} models, {len(all_successful_scores)} successful clip evaluations")
             
             # Log task-level summary
-            if consolidated_data['task_level_summary']['evaluation_distribution']:
-                eval_dist = consolidated_data['task_level_summary']['evaluation_distribution']
-                dist_summary = ", ".join([f"{k}: {v}" for k, v in eval_dist.items() if v > 0])
-                overall_quality = consolidated_data['task_level_summary']['overall_quality']
-                logger.info(f"    Task evaluation distribution: {dist_summary}, overall: {overall_quality}")
+            if consolidated_data['task_level_summary']['score_statistics']:
+                score_stats = consolidated_data['task_level_summary']['score_statistics']
+                avg_score = score_stats['average_score']
+                overall_quality_score = consolidated_data['task_level_summary']['overall_quality_score']
+                logger.info(f"    Task score statistics: avg={avg_score:.3f}, overall_quality={overall_quality_score:.3f}")
             
         except Exception as e:
             logger.error(f" Failed to save consolidated model results: {e}")
