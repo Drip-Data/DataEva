@@ -143,8 +143,18 @@ class OpenAIClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -198,8 +208,18 @@ class GoogleGeminiClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -253,8 +273,18 @@ class AnthropicClaudeClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -324,8 +354,18 @@ class DeepSeekClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -403,8 +443,18 @@ class KimiClient(BaseLLMClient):
                 else:
                     raise ValueError("No valid JSON found in response")
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -505,8 +555,18 @@ class VertexAIClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -567,8 +627,18 @@ class VertexAIClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -617,8 +687,18 @@ class VertexAIClient(BaseLLMClient):
                 # Try to parse as JSON
                 eval_data = json.loads(content)
                 
+                # Extract scores from the flat JSON structure
+                scores = {}
+                if "reasonableness_score" in eval_data:
+                    scores["reasonableness_score"] = eval_data["reasonableness_score"]
+                if "correctness_score" in eval_data:
+                    scores["correctness_score"] = eval_data["correctness_score"]
+                # Handle legacy nested scores format for backward compatibility
+                if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                    scores.update(eval_data["scores"])
+                
                 return EvaluationResponse(
-                    scores=eval_data.get("scores", {}),
+                    scores=scores,
                     summary=eval_data.get("summary", ""),
                     reasoning=eval_data.get("reasoning", ""),
                     success=True,
@@ -688,8 +768,18 @@ class GenericOpenAIClient(BaseLLMClient):
             # Flexible JSON parsing for third-party services
             eval_data = self._parse_response_content(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
@@ -774,8 +864,18 @@ class GenericAnthropicClient(BaseLLMClient):
             # Parse the JSON response
             eval_data = json.loads(content)
             
+            # Extract scores from the flat JSON structure
+            scores = {}
+            if "reasonableness_score" in eval_data:
+                scores["reasonableness_score"] = eval_data["reasonableness_score"]
+            if "correctness_score" in eval_data:
+                scores["correctness_score"] = eval_data["correctness_score"]
+            # Handle legacy nested scores format for backward compatibility
+            if "scores" in eval_data and isinstance(eval_data["scores"], dict):
+                scores.update(eval_data["scores"])
+            
             return EvaluationResponse(
-                scores=eval_data.get("scores", {}),
+                scores=scores,
                 summary=eval_data.get("summary", ""),
                 reasoning=eval_data.get("reasoning", ""),
                 success=True,
