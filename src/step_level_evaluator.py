@@ -15,6 +15,100 @@ from llm_api_clients import BaseLLMClient, LLMClientFactory, EvaluationConfig, E
 logger = logging.getLogger(__name__)
 
 @dataclass
+class FineTuningQAPair:
+    """Represents a query-answer pair for fine-tuning."""
+    query: str  # The prompt sent to the LLM
+    answer: str  # The response from the LLM
+    model_name: str  # Which model generated this response
+    provider: str  # Which provider was used
+    task_id: str  # Which task this came from
+    evaluation_type: str  # Type of evaluation: "clip", "category", or "final"
+    clip_number: Optional[int] = None  # For clip evaluations
+    category: Optional[str] = None  # For category evaluations
+    timestamp: str = field(default_factory=lambda: time.strftime('%Y-%m-%d %H:%M:%S'))
+
+@dataclass 
+class FineTuningDataCollector:
+    """Collects fine-tuning data during evaluation."""
+    qa_pairs: List[FineTuningQAPair] = field(default_factory=list)
+    enabled: bool = False
+    
+    def add_qa_pair(self, query: str, answer: str, model_name: str, provider: str, 
+                   task_id: str, evaluation_type: str, clip_number: Optional[int] = None, 
+                   category: Optional[str] = None):
+        """Add a new QA pair to the collection."""
+        if self.enabled:
+            qa_pair = FineTuningQAPair(
+                query=query,
+                answer=answer,
+                model_name=model_name,
+                provider=provider,
+                task_id=task_id,
+                evaluation_type=evaluation_type,
+                clip_number=clip_number,
+                category=category
+            )
+            self.qa_pairs.append(qa_pair)
+    
+    def save_to_llamafactory_format(self, output_path: str):
+        """Save collected QA pairs in LLaMa Factory format."""
+        if not self.qa_pairs:
+            logger.info("No fine-tuning QA pairs to save")
+            return
+            
+        llamafactory_data = []
+        for qa_pair in self.qa_pairs:
+            # Use conversation format for LLaMa Factory
+            llamafactory_entry = {
+                "conversations": [
+                    {"from": "human", "value": qa_pair.query},
+                    {"from": "gpt", "value": qa_pair.answer}
+                ],
+                "metadata": {
+                    "model_name": qa_pair.model_name,
+                    "provider": qa_pair.provider,
+                    "task_id": qa_pair.task_id,
+                    "evaluation_type": qa_pair.evaluation_type,
+                    "clip_number": qa_pair.clip_number,
+                    "category": qa_pair.category,
+                    "timestamp": qa_pair.timestamp
+                }
+            }
+            llamafactory_data.append(llamafactory_entry)
+        
+        # Save to file
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for entry in llamafactory_data:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            
+            logger.info(f"Saved {len(llamafactory_data)} fine-tuning QA pairs to {output_path}")
+            logger.info(f"  Models involved: {len(set(qa.model_name for qa in self.qa_pairs))}")
+            logger.info(f"  Tasks covered: {len(set(qa.task_id for qa in self.qa_pairs))}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save fine-tuning data: {e}")
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get statistics about collected fine-tuning data."""
+        if not self.qa_pairs:
+            return {}
+            
+        return {
+            "total_qa_pairs": len(self.qa_pairs),
+            "unique_models": len(set(qa.model_name for qa in self.qa_pairs)),
+            "unique_tasks": len(set(qa.task_id for qa in self.qa_pairs)),
+            "evaluation_types": {
+                eval_type: len([qa for qa in self.qa_pairs if qa.evaluation_type == eval_type])
+                for eval_type in set(qa.evaluation_type for qa in self.qa_pairs)
+            },
+            "models": {
+                model: len([qa for qa in self.qa_pairs if qa.model_name == model])
+                for model in set(qa.model_name for qa in self.qa_pairs)
+            }
+        }
+
+@dataclass
 class Clip:
     """Represents a clip in the trajectory for evaluation."""
     content: str
@@ -324,15 +418,22 @@ Please provide your evaluation in the following JSON format:
 class MultiModelStepLevelEvaluator:
     """Multi-model step-level evaluator for AI agent trajectories."""
     
-    def __init__(self, multi_model_config: MultiModelEvaluationConfig):
+    def __init__(self, multi_model_config: MultiModelEvaluationConfig, 
+                 collect_finetune_data: bool = False):
         """Initialize with multiple LLM clients."""
         self.multi_model_config = multi_model_config
         self.llm_clients = multi_model_config.create_clients()
+        
+        # Initialize fine-tuning data collector
+        self.finetune_collector = FineTuningDataCollector()
+        self.finetune_collector.enabled = collect_finetune_data
         
         if not self.llm_clients:
             raise ValueError("No valid LLM clients could be created from the configuration")
         
         logger.info(f"Initialized multi-model evaluator with {len(self.llm_clients)} models")
+        if collect_finetune_data:
+            logger.info("Fine-tuning data collection enabled")
     
     def extract_clips(self, raw_response: str) -> List[Clip]:
         """Extract clips from the trajectory based on <think></think> <tool_call></tool_call> <result></result> patterns."""
@@ -481,7 +582,7 @@ class MultiModelStepLevelEvaluator:
         
         return groups
     
-    async def evaluate_clip_with_all_models(self, clip: Clip, task_description: str, previous_context: str, ground_truth_answer: str = "", model_final_result: str = "") -> MultiModelClipEvaluation:
+    async def evaluate_clip_with_all_models(self, clip: Clip, task_description: str, previous_context: str, ground_truth_answer: str = "", model_final_result: str = "", task_id: str = "unknown") -> MultiModelClipEvaluation:
         """Evaluate a single clip using all configured models."""
         # Choose appropriate template based on whether it's the final clip
         if clip.is_final_clip:
@@ -532,6 +633,18 @@ class MultiModelStepLevelEvaluator:
                 model_evaluations[model_key] = evaluation
                 if evaluation.success:
                     successful_evaluations.append(evaluation)
+                
+                # Collect fine-tuning data if enabled
+                if evaluation.success and hasattr(evaluation, 'raw_response') and evaluation.raw_response:
+                    self.finetune_collector.add_qa_pair(
+                        query=prompt,
+                        answer=evaluation.raw_response,
+                        model_name=client.model_name,
+                        provider=client.provider_name,
+                        task_id=task_id,
+                        evaluation_type="clip",
+                        clip_number=clip.clip_number
+                    )
         
         # Calculate averaged evaluation
         if successful_evaluations:
@@ -603,7 +716,7 @@ class MultiModelStepLevelEvaluator:
         
         return averaged
     
-    async def evaluate_category_with_all_models(self, category: str, clips: List[Clip], clip_evaluations: List[MultiModelClipEvaluation], task_description: str) -> MultiModelCategoryEvaluation:
+    async def evaluate_category_with_all_models(self, category: str, clips: List[Clip], clip_evaluations: List[MultiModelClipEvaluation], task_description: str, task_id: str = "unknown") -> MultiModelCategoryEvaluation:
         """Evaluate a category (group of clips) with all models."""
         
         # Build clips summary for category evaluation as required: summary + evaluation result for each clip
@@ -656,6 +769,18 @@ class MultiModelStepLevelEvaluator:
                 model_evaluations[model_key] = evaluation
                 if evaluation.success:
                     successful_evaluations.append(evaluation)
+                
+                # Collect fine-tuning data if enabled
+                if evaluation.success and hasattr(evaluation, 'raw_response') and evaluation.raw_response:
+                    self.finetune_collector.add_qa_pair(
+                        query=prompt,
+                        answer=evaluation.raw_response,
+                        model_name=client.model_name,
+                        provider=client.provider_name,
+                        task_id=task_id,
+                        evaluation_type="category",
+                        category=category
+                    )
         
         # Calculate averaged results
         if successful_evaluations:
@@ -689,7 +814,7 @@ class MultiModelStepLevelEvaluator:
             num_successful_models=len(successful_evaluations)
         )
     
-    async def evaluate_final_trajectory_with_all_models(self, all_clips: List[Clip], all_clip_evaluations: List[MultiModelClipEvaluation], task_description: str, ground_truth_answer: str = "", model_final_result: str = "") -> MultiModelCategoryEvaluation:
+    async def evaluate_final_trajectory_with_all_models(self, all_clips: List[Clip], all_clip_evaluations: List[MultiModelClipEvaluation], task_description: str, ground_truth_answer: str = "", model_final_result: str = "", task_id: str = "unknown") -> MultiModelCategoryEvaluation:
         """Evaluate the entire trajectory with all models for final assessment."""
         
         # Build complete trajectory summary with ALL clips and their evaluations
@@ -736,6 +861,18 @@ class MultiModelStepLevelEvaluator:
                 model_evaluations[model_key] = evaluation
                 if evaluation.success:
                     successful_evaluations.append(evaluation)
+                
+                # Collect fine-tuning data if enabled
+                if evaluation.success and hasattr(evaluation, 'raw_response') and evaluation.raw_response:
+                    self.finetune_collector.add_qa_pair(
+                        query=prompt,
+                        answer=evaluation.raw_response,
+                        model_name=client.model_name,
+                        provider=client.provider_name,
+                        task_id=task_id,
+                        evaluation_type="final",
+                        category="final"
+                    )
         
         # Calculate averaged results for the entire trajectory
         if successful_evaluations:
@@ -798,14 +935,15 @@ class MultiModelStepLevelEvaluator:
             raw_response = trajectory_data.get('raw_response', '')
             model_final_result = trajectory_data.get('final_result', '')
         
-        # Extract ground truth answer
+        # Extract ground truth answer and task_id
         ground_truth_answer = trajectory_data.get('answer', '')
+        task_id = trajectory_data.get('task_id', 'unknown')
         
         if not raw_response:
             logger.error("No raw_response found in trajectory data")
             return trajectory_data
         
-        logger.info(f"Starting sequential multi-model evaluation for task: {trajectory_data.get('task_id', 'unknown')}")
+        logger.info(f"Starting sequential multi-model evaluation for task: {task_id}")
         
         # Extract clips and group by category
         clips = self.extract_clips(raw_response)
@@ -832,7 +970,7 @@ class MultiModelStepLevelEvaluator:
                 
                 logger.info(f"  Evaluating clip {clip.clip_number} ({category})")
                 evaluation = await self.evaluate_clip_with_all_models(
-                    clip, task_description, previous_context, ground_truth_answer, model_final_result
+                    clip, task_description, previous_context, ground_truth_answer, model_final_result, task_id
                 )
                 group_clip_evaluations.append(evaluation)
                 all_clip_evaluations.append(evaluation)
@@ -846,11 +984,11 @@ class MultiModelStepLevelEvaluator:
                 if is_final_group and clip_group[0].is_final_clip:
                     # For final trajectory evaluation, include ALL clips, not just the final one
                     category_evaluation = await self.evaluate_final_trajectory_with_all_models(
-                        clips, all_clip_evaluations, task_description, ground_truth_answer, model_final_result
+                        clips, all_clip_evaluations, task_description, ground_truth_answer, model_final_result, task_id
                     )
                 else:
                     category_evaluation = await self.evaluate_category_with_all_models(
-                        category, clip_group, group_clip_evaluations, task_description
+                        category, clip_group, group_clip_evaluations, task_description, task_id
                     )
                 all_category_evaluations.append(category_evaluation)
         
@@ -916,6 +1054,19 @@ class MultiModelStepLevelEvaluator:
         })
         
         logger.info(f"Sequential evaluation completed: {len(successful_scores)}/{len(clips)} clips, {len([e for e in all_category_evaluations if e.success])}/{len(all_category_evaluations)} categories")
+        
+        # Save fine-tuning data if enabled
+        if self.finetune_collector.enabled and self.finetune_collector.qa_pairs:
+            finetune_output_path = output_path / "finetune.jsonl"
+            self.finetune_collector.save_to_llamafactory_format(str(finetune_output_path))
+            
+            # Log fine-tuning statistics
+            stats = self.finetune_collector.get_statistics()
+            if stats:
+                logger.info(f"Fine-tuning data collection summary:")
+                logger.info(f"  Total QA pairs: {stats.get('total_qa_pairs', 0)}")
+                logger.info(f"  Models involved: {stats.get('unique_models', 0)}")
+                logger.info(f"  Evaluation types: {list(stats.get('evaluation_types', {}).keys())}")
         
         return result
     
@@ -1162,7 +1313,7 @@ class MultiModelStepLevelEvaluator:
 class StepLevelEvaluator:
     """Single-model step-level evaluator (for backward compatibility)."""
     
-    def __init__(self, llm_client: BaseLLMClient):
+    def __init__(self, llm_client: BaseLLMClient, collect_finetune_data: bool = False):
         """Initialize with a single LLM client."""
         # Create a multi-model config with just one model
         model_config = ModelConfig(
@@ -1172,7 +1323,7 @@ class StepLevelEvaluator:
         )
         
         multi_config = MultiModelEvaluationConfig([model_config])
-        self.multi_evaluator = MultiModelStepLevelEvaluator(multi_config)
+        self.multi_evaluator = MultiModelStepLevelEvaluator(multi_config, collect_finetune_data)
         self.multi_evaluator.llm_clients = [llm_client]  # Use the provided client directly
     
     async def evaluate_trajectory_with_full_response(self, trajectory_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1187,7 +1338,7 @@ def create_evaluator(provider: str, api_key: str, model_name: Optional[str] = No
     return StepLevelEvaluator(client)
 
 
-def create_multi_model_evaluator(model_configs: List[ModelConfig], rate_limit_delay: float = 1.0) -> MultiModelStepLevelEvaluator:
+def create_multi_model_evaluator(model_configs: List[ModelConfig], rate_limit_delay: float = 1.0, collect_finetune_data: bool = False) -> MultiModelStepLevelEvaluator:
     """Create a multi-model evaluator."""
     multi_config = MultiModelEvaluationConfig(model_configs, rate_limit_delay)
-    return MultiModelStepLevelEvaluator(multi_config) 
+    return MultiModelStepLevelEvaluator(multi_config, collect_finetune_data) 

@@ -22,6 +22,9 @@ Usage Examples:
     # Multi-model evaluation only (assumes preprocessed data)
     python run_evaluation.py --input data/preprocessed.jsonl --multi-model --output data/results.jsonl
 
+    # Collect fine-tuning data while evaluating
+    python run_evaluation.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --collect-finetune-data
+
     # Test multi-model configuration before running evaluation
     python src/test_multi_model_interactive.py
 
@@ -78,6 +81,9 @@ Examples:
   # Multi-model evaluation only (assumes preprocessed data)
   python run_evaluation.py --input data/preprocessed.jsonl --multi-model
 
+  # Collect fine-tuning data while evaluating
+  python run_evaluation.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --collect-finetune-data
+
   # Test multi-model configuration before running evaluation
   python src/test_multi_model_interactive.py
 
@@ -126,6 +132,8 @@ Examples:
                        help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--beta-threshold', type=int, default=15,
                        help='Maximum tool calls per sample in preprocessing (default: 15)')
+    parser.add_argument('--collect-finetune-data', action='store_true',
+                       help='Collect LLM query-answer pairs for fine-tuning (saves to finetune.jsonl)')
     
     # Logging and output
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -300,6 +308,13 @@ def print_mode_info(args: argparse.Namespace, jsonl_files: List[str]):
             print(f"  • Provider: {args.provider}")
             print(f"  • Model: {args.model or 'default'}")
         print(f"  • Batch size: {args.batch_size}")
+    
+    # Fine-tuning data collection info
+    if not args.preprocess_only and args.collect_finetune_data:
+        print(f"\n FINE-TUNING DATA COLLECTION:")
+        print("  • Query-Answer pairs will be collected from LLM judge interactions")
+        print("  • Data will be saved in LLaMa Factory compatible format")
+        print("  • Output file: finetune.jsonl")
 
 
 def print_completion_summary(args: argparse.Namespace, processed_files: List[str]):
@@ -570,7 +585,8 @@ async def process_single_file(input_file: str, output_file: str, args: argparse.
                 full_pipeline=args.full_pipeline,
                 beta_threshold=args.beta_threshold,
                 multi_model=args.multi_model,
-                model_configs=model_configs
+                model_configs=model_configs,
+                collect_finetune_data=args.collect_finetune_data
             )
             print(" Evaluation service initialized successfully")
         except Exception as e:

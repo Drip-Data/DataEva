@@ -26,7 +26,7 @@ from pathlib import Path
 # Import our modules
 from preprocess_agent_data import AgentDataPreprocessor
 from step_level_evaluator import StepLevelEvaluator, MultiModelStepLevelEvaluator, create_evaluator, create_multi_model_evaluator
-from llm_api_clients import ModelConfig, MultiModelEvaluationConfig
+from llm_api_clients import ModelConfig, MultiModelEvaluationConfig, LLMClientFactory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,7 +47,8 @@ class EvaluationService:
                  beta_threshold: int = 15,
                  split_size: int = 0,
                  multi_model: bool = False,
-                 model_configs: Optional[List[ModelConfig]] = None):
+                 model_configs: Optional[List[ModelConfig]] = None,
+                 collect_finetune_data: bool = False):
         
         self.provider = provider
         self.api_key = api_key
@@ -60,6 +61,7 @@ class EvaluationService:
         self.split_size = split_size
         self.multi_model = multi_model
         self.model_configs = model_configs or []
+        self.collect_finetune_data = collect_finetune_data
         
         # Initialize preprocessor
         self.preprocessor = AgentDataPreprocessor(beta_threshold=beta_threshold, split_size=split_size)
@@ -69,8 +71,10 @@ class EvaluationService:
             if multi_model and model_configs:
                 # Multi-model evaluation
                 try:
-                    self.evaluator = create_multi_model_evaluator(model_configs, rate_limit_delay)
+                    self.evaluator = create_multi_model_evaluator(model_configs, rate_limit_delay, collect_finetune_data)
                     logger.info(f"Using multi-model evaluation with {len(model_configs)} models")
+                    if collect_finetune_data:
+                        logger.info("Fine-tuning data collection enabled for multi-model evaluation")
                 except Exception as e:
                     logger.error(f"Failed to initialize multi-model evaluator: {e}")
                     raise
@@ -80,9 +84,13 @@ class EvaluationService:
                     raise ValueError(f"API key is required for {provider} evaluation. Please provide --api-key or set environment variable.")
                 
                 try:
-                    self.evaluator = create_evaluator(provider, api_key, model_name)
+                    # Create client first and pass to evaluator with fine-tuning parameter
+                    client = LLMClientFactory.create_client(provider, api_key, model_name)
+                    self.evaluator = StepLevelEvaluator(client, collect_finetune_data)
                     self.evaluator.multi_evaluator.llm_clients[0].set_rate_limit_delay(rate_limit_delay)
                     logger.info(f"Using {provider} for evaluation with model {model_name or 'default'}")
+                    if collect_finetune_data:
+                        logger.info("Fine-tuning data collection enabled for single-model evaluation")
                 except Exception as e:
                     logger.error(f"Failed to initialize LLM client for {provider}: {e}")
                     raise
@@ -314,6 +322,20 @@ class EvaluationService:
             if self.stats['evaluated_samples'] > 0:
                 avg_time = duration / self.stats['evaluated_samples']
                 print(f"Average time per sample: {avg_time:.2f} seconds")
+        
+        # Fine-tuning data collection summary
+        if self.collect_finetune_data and hasattr(self, 'evaluator') and self.evaluator:
+            print(f"\nFine-tuning Data Collection:")
+            print(f"  Enabled: {self.collect_finetune_data}")
+            if hasattr(self.evaluator, 'multi_evaluator') and hasattr(self.evaluator.multi_evaluator, 'finetune_collector'):
+                collector = self.evaluator.multi_evaluator.finetune_collector
+                stats = collector.get_statistics()
+                if stats:
+                    print(f"  Total QA pairs collected: {stats.get('total_qa_pairs', 0)}")
+                    print(f"  Models involved: {stats.get('unique_models', 0)}")
+                    print(f"  Evaluation types: {list(stats.get('evaluation_types', {}).keys())}")
+                else:
+                    print(f"  No QA pairs collected yet")
         
         print("="*60)
 
