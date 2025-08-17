@@ -48,7 +48,8 @@ class EvaluationService:
                  split_size: int = 0,
                  multi_model: bool = False,
                  model_configs: Optional[List[ModelConfig]] = None,
-                 collect_finetune_data: bool = False):
+                 collect_finetune_data: bool = False,
+                 finetune_output_dir: str = "data"):
         
         self.provider = provider
         self.api_key = api_key
@@ -62,6 +63,7 @@ class EvaluationService:
         self.multi_model = multi_model
         self.model_configs = model_configs or []
         self.collect_finetune_data = collect_finetune_data
+        self.finetune_output_dir = finetune_output_dir
         
         # Initialize preprocessor
         self.preprocessor = AgentDataPreprocessor(beta_threshold=beta_threshold, split_size=split_size)
@@ -84,9 +86,7 @@ class EvaluationService:
                     raise ValueError(f"API key is required for {provider} evaluation. Please provide --api-key or set environment variable.")
                 
                 try:
-                    # Create client first and pass to evaluator with fine-tuning parameter
-                    client = LLMClientFactory.create_client(provider, api_key, model_name)
-                    self.evaluator = StepLevelEvaluator(client, collect_finetune_data)
+                    self.evaluator = create_evaluator(provider, api_key, model_name, collect_finetune_data)
                     self.evaluator.multi_evaluator.llm_clients[0].set_rate_limit_delay(rate_limit_delay)
                     logger.info(f"Using {provider} for evaluation with model {model_name or 'default'}")
                     if collect_finetune_data:
@@ -225,15 +225,15 @@ class EvaluationService:
     async def _evaluate_single_sample(self, sample: Dict) -> Dict:
         """Evaluate a single sample using the configured evaluator."""
         try:
-            # Use the new output directory structure for multi-model files
-            output_dir = "data/model_evaluations"
-            
+            # Use consistent output directory for evaluation results
             if self.multi_model:
-                # Multi-model evaluation
+                # Multi-model evaluation - always use model_evaluations directory for consistency
+                output_dir = "data/model_evaluations"
                 result = await self.evaluator.evaluate_trajectory_with_full_response(sample, output_dir)
             else:
-                # Single-model evaluation  
-                result = await self.evaluator.evaluate_trajectory_with_full_response(sample)
+                # Single-model evaluation - use user-specified directory
+                output_dir = self.finetune_output_dir
+                result = await self.evaluator.evaluate_trajectory_with_full_response(sample, output_dir)
             
             return result
             

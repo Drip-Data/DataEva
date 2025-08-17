@@ -83,6 +83,9 @@ Examples:
 
   # Collect fine-tuning data while evaluating
   python run_evaluation.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --collect-finetune-data
+  
+  # Collect fine-tuning data to custom directory
+  python run_evaluation.py --input data/demo01.jsonl --provider openai --api-key YOUR_KEY --full-pipeline --collect-finetune-data --finetune-output-dir my_finetune_data
 
   # Test multi-model configuration before running evaluation
   python src/test_multi_model_interactive.py
@@ -134,6 +137,8 @@ Examples:
                        help='Maximum tool calls per sample in preprocessing (default: 15)')
     parser.add_argument('--collect-finetune-data', action='store_true',
                        help='Collect LLM query-answer pairs for fine-tuning (saves to finetune.jsonl)')
+    parser.add_argument('--finetune-output-dir', type=str, default='data',
+                       help='Directory to save fine-tuning data (default: data)')
     
     # Logging and output
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -586,7 +591,8 @@ async def process_single_file(input_file: str, output_file: str, args: argparse.
                 beta_threshold=args.beta_threshold,
                 multi_model=args.multi_model,
                 model_configs=model_configs,
-                collect_finetune_data=args.collect_finetune_data
+                collect_finetune_data=args.collect_finetune_data,
+                finetune_output_dir=args.finetune_output_dir
             )
             print(" Evaluation service initialized successfully")
         except Exception as e:

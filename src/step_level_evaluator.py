@@ -736,11 +736,23 @@ class MultiModelStepLevelEvaluator:
             'final': PromptTemplates.FINAL_CATEGORY_TEMPLATE
         }
         
-        template = category_templates.get(category, PromptTemplates.FINAL_CATEGORY_TEMPLATE)
-        prompt = template.format(
-            task_description=task_description,
-            clips_summary=clips_summary
-        )
+        template = category_templates.get(category, PromptTemplates.DEEPSEARCH_CATEGORY_TEMPLATE)
+        
+        # Handle different template parameter requirements
+        if template == PromptTemplates.FINAL_CATEGORY_TEMPLATE:
+            # Final category template needs additional parameters
+            prompt = template.format(
+                task_description=task_description,
+                clips_summary=clips_summary,
+                ground_truth_answer="",  # Default for category evaluation
+                model_final_result=""    # Default for category evaluation
+            )
+        else:
+            # Regular category templates only need these parameters
+            prompt = template.format(
+                task_description=task_description,
+                clips_summary=clips_summary
+            )
         
         # Evaluate with all models in parallel
         tasks = []
@@ -1057,7 +1069,12 @@ class MultiModelStepLevelEvaluator:
         
         # Save fine-tuning data if enabled
         if self.finetune_collector.enabled and self.finetune_collector.qa_pairs:
+            # Ensure output directory exists
+            output_path.mkdir(parents=True, exist_ok=True)
+            
             finetune_output_path = output_path / "finetune.jsonl"
+            logger.info(f"Saving fine-tuning data to: {finetune_output_path}")
+            
             self.finetune_collector.save_to_llamafactory_format(str(finetune_output_path))
             
             # Log fine-tuning statistics
@@ -1067,6 +1084,9 @@ class MultiModelStepLevelEvaluator:
                 logger.info(f"  Total QA pairs: {stats.get('total_qa_pairs', 0)}")
                 logger.info(f"  Models involved: {stats.get('unique_models', 0)}")
                 logger.info(f"  Evaluation types: {list(stats.get('evaluation_types', {}).keys())}")
+                logger.info(f"  Saved to: {finetune_output_path}")
+        elif self.finetune_collector.enabled:
+            logger.warning("Fine-tuning data collection enabled but no QA pairs collected")
         
         return result
     
@@ -1332,10 +1352,10 @@ class StepLevelEvaluator:
         return result
 
 
-def create_evaluator(provider: str, api_key: str, model_name: Optional[str] = None) -> StepLevelEvaluator:
+def create_evaluator(provider: str, api_key: str, model_name: Optional[str] = None, collect_finetune_data: bool = False) -> StepLevelEvaluator:
     """Create a single-model evaluator (backward compatibility)."""
     client = LLMClientFactory.create_client(provider, api_key, model_name)
-    return StepLevelEvaluator(client)
+    return StepLevelEvaluator(client, collect_finetune_data)
 
 
 def create_multi_model_evaluator(model_configs: List[ModelConfig], rate_limit_delay: float = 1.0, collect_finetune_data: bool = False) -> MultiModelStepLevelEvaluator:
