@@ -2,7 +2,7 @@
 
 This framework provides a complete solution for fine-tuning process reward models using LLaMA Factory. It's specifically designed for training models that can evaluate AI agent performance step-by-step.
 
-## 📁 Framework Structure
+##  Framework Structure
 
 ```
 finetune/
@@ -19,7 +19,7 @@ finetune/
 └── explanation.md              # This guide
 ```
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Prepare Your Environment
 
@@ -52,7 +52,7 @@ Make sure you have:
 ./run_training.sh --validate-only
 ```
 
-## 📊 Dataset Variants
+##  Dataset Variants
 
 The framework automatically generates multiple dataset variants from your `finetune.jsonl`:
 
@@ -71,7 +71,7 @@ The framework automatically generates multiple dataset variants from your `finet
 - `reward_model_webshaper_qa_0` - Task-specific training
 - *(Additional variants based on your data)*
 
-## ⚙️ Configuration
+##  Configuration
 
 ### Training Configuration (`training_config.yaml`)
 
@@ -109,7 +109,7 @@ Choose the correct template based on your model:
 - `mistral` - For Mistral models
 - `chatglm3` - For ChatGLM models
 
-## 🔄 Training Process
+##  Training Process
 
 ### Step 1: Data Conversion
 ```bash
@@ -135,7 +135,7 @@ Or use the convenience script:
 python train.py --config training_config.yaml --export
 ```
 
-## 📈 Monitoring
+##  Monitoring
 
 ### SwanLab Integration
 
@@ -159,7 +159,7 @@ Check training progress:
 tail -f ./logs/trainer_log.jsonl
 ```
 
-## 🎯 Advanced Usage
+##  Advanced Usage
 
 ### Custom Dataset Filtering
 
@@ -202,7 +202,7 @@ Resume from a checkpoint:
 resume_from_checkpoint: "./saves/reward_model_training/checkpoint-500"
 ```
 
-## 🔧 Troubleshooting
+##  Troubleshooting
 
 ### Common Issues
 
@@ -247,7 +247,7 @@ For A100 40GB GPU:
    - Lower `learning_rate` for stability
    - Adjust `lora_rank` based on model complexity
 
-## 📋 Training Checklist
+##  Training Checklist
 
 Before starting training:
 

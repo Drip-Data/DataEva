@@ -114,8 +114,12 @@ class RewardModelTrainer:
         # Memory and performance
         if self.config.get('bf16', True):
             args.append('--bf16')
+        if self.config.get('fp16', False):
+            args.append('--fp16')
         if self.config.get('tf32', True):
-            args.append('--tf32')
+            args.extend(['--tf32', 'True'])
+        else:
+            args.extend(['--tf32', 'False'])
         
         # Logging
         args.extend(['--logging_steps', str(self.config.get('logging_steps', 5))])
@@ -125,7 +129,7 @@ class RewardModelTrainer:
         # Evaluation
         if self.config.get('do_eval', False):
             args.extend(['--do_eval', 'True'])
-            args.extend(['--evaluation_strategy', self.config.get('evaluation_strategy', 'steps')])
+            args.extend(['--eval_strategy', self.config.get('eval_strategy', 'steps')])  # FIXED: Use eval_strategy from config
             args.extend(['--eval_steps', str(self.config.get('eval_steps', 500))])
             args.extend(['--per_device_eval_batch_size', str(self.config.get('per_device_eval_batch_size', 2))])
         
@@ -135,6 +139,14 @@ class RewardModelTrainer:
         
         if self.config.get('max_samples', -1) > 0:
             args.extend(['--max_samples', str(self.config.get('max_samples'))])
+        
+        # Additional LLaMA Factory specific arguments
+        if self.config.get('group_by_length', False):
+            args.append('--group_by_length')
+        if self.config.get('dataloader_pin_memory', True):
+            args.append('--dataloader_pin_memory')
+        if self.config.get('remove_unused_columns', True):
+            args.append('--remove_unused_columns')
         
         # Reproducibility
         args.extend(['--seed', str(self.config.get('seed', 42))])

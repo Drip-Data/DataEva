@@ -72,7 +72,7 @@ run_name: process_reward_model_full_v1
 experiment_name: reward_model_full_training
 
 ### Evaluation - ENHANCED for large dataset ###
-evaluation_strategy: steps
+eval_strategy: steps  # FIXED: Changed from evaluation_strategy to eval_strategy
 eval_steps: 1000  # INCREASED: Less frequent evaluation
 eval_delay: 500   # ADDED: Delay initial evaluation
 eval_on_start: false

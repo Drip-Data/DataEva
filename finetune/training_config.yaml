@@ -78,7 +78,7 @@ run_name: process_reward_model_v1
 experiment_name: reward_model_training
 
 ### Evaluation ###
-evaluation_strategy: steps
+eval_strategy: steps  # FIXED: Changed from evaluation_strategy to eval_strategy
 eval_steps: 500
 eval_delay: 0
 eval_on_start: false
