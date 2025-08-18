@@ -1,0 +1,125 @@
+# Process Reward Model Training Configuration
+# Optimized for A100 40GB GPU with local model and data paths
+
+### Model Configuration ###
+model_name_or_path: ./model  # Local model directory
+tokenizer_name_or_path: ./model
+trust_remote_code: true
+
+### Fine-tuning Configuration ###
+finetuning_type: lora
+lora_target: all
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.1
+modules_to_save: []
+use_rslora: false
+use_dora: false
+lora_plus_scale: 1.0
+
+### Dataset Configuration ###
+dataset_dir: ./data
+dataset: reward_model_full  # Change this to use different dataset variants
+template: qwen  # Change based on your model (qwen, llama3, etc.)
+cutoff_len: 4096
+max_samples: -1  # Use all samples, set to specific number to limit
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### Training Hyperparameters ###
+stage: sft
+do_train: true
+do_eval: false
+do_predict: false
+
+# Optimization settings
+optim: adamw_torch
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# Training schedule
+num_train_epochs: 3.0
+max_steps: -1
+dataloader_num_workers: 0
+remove_unused_columns: true
+group_by_length: false
+
+# Batch size and gradient accumulation
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+gradient_accumulation_steps: 8
+dataloader_pin_memory: true
+
+### Memory and Performance ###
+bf16: true  # Use bfloat16 for A100
+fp16: false
+tf32: true
+torch_dtype: auto
+low_cpu_mem_usage: true
+use_cache: false
+
+# DeepSpeed settings (optional)
+deepspeed: ""  # Leave empty for no DeepSpeed, or path to ds_config.json
+
+### Logging and Monitoring ###
+output_dir: ./saves/reward_model_training
+logging_dir: ./logs
+overwrite_output_dir: true
+logging_steps: 5
+logging_first_step: true
+logging_nan_inf_filter: true
+
+# SwanLab monitoring (replaces wandb)
+report_to: []  # Will be set to swanlab in train.py
+run_name: process_reward_model_v1
+experiment_name: reward_model_training
+
+### Evaluation ###
+evaluation_strategy: steps
+eval_steps: 500
+eval_delay: 0
+eval_on_start: false
+per_device_eval_batch_size: 2
+
+### Saving ###
+save_strategy: steps
+save_steps: 500
+save_total_limit: 3
+save_safetensors: true
+save_only_model: false
+
+### Resume Training ###
+resume_from_checkpoint: ""  # Path to checkpoint directory to resume from
+
+### Reproducibility ###
+seed: 42
+data_seed: 42
+
+### Advanced Settings ###
+ddp_timeout: 1800
+ddp_backend: nccl
+ddp_find_unused_parameters: false
+dataloader_drop_last: false
+include_num_input_tokens_seen: false
+neftune_noise_alpha: 0  # Set to 5-15 for NEFTune noise injection
+
+### Model Export ###
+export_dir: ./exported_model
+export_size: 2
+export_device: cpu
+export_legacy_format: false
+
+### Prediction Settings ###
+do_sample: true
+temperature: 0.7
+top_p: 0.9
+top_k: 50
+num_beams: 1
+max_new_tokens: 1024
+repetition_penalty: 1.1
+
+### Special Tokens ###
+additional_special_tokens: []

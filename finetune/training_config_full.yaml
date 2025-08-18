@@ -1,0 +1,126 @@
+# Process Reward Model Training Configuration - FULL PARAMETER FINE-TUNING
+# Optimized for A100 40GB GPU with 15,000 QA pairs
+
+### Model Configuration ###
+model_name_or_path: ./model  # Local model directory
+tokenizer_name_or_path: ./model
+trust_remote_code: true
+
+### Fine-tuning Configuration ###
+finetuning_type: full  # CHANGED: Full parameter fine-tuning instead of LoRA
+# LoRA parameters removed for full fine-tuning
+
+### Dataset Configuration ###
+dataset_dir: ./data
+dataset: reward_model_full  # Change this to use different dataset variants
+template: qwen  # Change based on your model (qwen, llama3, etc.)
+cutoff_len: 2048  # REDUCED: For better memory management with full fine-tuning
+max_samples: -1  # Use all samples
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### Training Hyperparameters ###
+stage: sft
+do_train: true
+do_eval: true  # ENABLED: With 15k samples, evaluation is valuable
+do_predict: false
+
+# Optimization settings - ADJUSTED for full fine-tuning
+optim: adamw_torch
+learning_rate: 5.0e-6  # REDUCED: Lower LR for full fine-tuning stability
+lr_scheduler_type: cosine
+warmup_ratio: 0.03  # REDUCED: Shorter warmup for large dataset
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+# Training schedule - ADJUSTED for 15k samples
+num_train_epochs: 2.0  # REDUCED: Fewer epochs needed with large dataset
+max_steps: -1
+dataloader_num_workers: 4  # REDUCED: For memory efficiency
+remove_unused_columns: true
+group_by_length: true  # ENABLED: Better efficiency with varied lengths
+
+# Batch size and gradient accumulation - ADJUSTED for full fine-tuning
+per_device_train_batch_size: 1  # REDUCED: Full fine-tuning uses more memory
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16  # INCREASED: To maintain effective batch size
+dataloader_pin_memory: true
+
+### Memory and Performance ###
+bf16: true  # Use bfloat16 for A100
+fp16: false
+tf32: true
+torch_dtype: auto
+low_cpu_mem_usage: true
+use_cache: false
+dataloader_drop_last: true  # ENABLED: For consistent batch sizes
+
+# DeepSpeed settings - RECOMMENDED for full fine-tuning
+deepspeed: "./ds_config_full.json"  # Use DeepSpeed for memory optimization
+
+### Logging and Monitoring ###
+output_dir: ./saves/reward_model_full_training
+logging_dir: ./logs
+overwrite_output_dir: true
+logging_steps: 10  # INCREASED: Less frequent logging for large dataset
+logging_first_step: true
+logging_nan_inf_filter: true
+
+# SwanLab monitoring
+report_to: []  # Will be set to swanlab in train.py
+run_name: process_reward_model_full_v1
+experiment_name: reward_model_full_training
+
+### Evaluation - ENHANCED for large dataset ###
+evaluation_strategy: steps
+eval_steps: 1000  # INCREASED: Less frequent evaluation
+eval_delay: 500   # ADDED: Delay initial evaluation
+eval_on_start: false
+per_device_eval_batch_size: 1
+eval_accumulation_steps: 8  # ADDED: For evaluation efficiency
+
+### Saving - ADJUSTED for longer training ###
+save_strategy: steps
+save_steps: 1000  # INCREASED: Less frequent saving
+save_total_limit: 5  # INCREASED: Keep more checkpoints
+save_safetensors: true
+save_only_model: false
+load_best_model_at_end: true  # ENABLED: Load best checkpoint at end
+metric_for_best_model: eval_loss
+greater_is_better: false
+
+### Resume Training ###
+resume_from_checkpoint: ""  # Path to checkpoint directory to resume from
+
+### Reproducibility ###
+seed: 42
+data_seed: 42
+
+### Advanced Settings ###
+ddp_timeout: 3600  # INCREASED: Longer timeout for full fine-tuning
+ddp_backend: nccl
+ddp_find_unused_parameters: false
+include_num_input_tokens_seen: false
+neftune_noise_alpha: 0  # Keep disabled for stability
+
+# Early stopping - ADDED for large dataset
+early_stopping_patience: 3
+early_stopping_threshold: 0.001
+
+### Model Export ###
+export_dir: ./exported_model_full
+export_size: 2
+export_device: cpu
+export_legacy_format: false
+
+### Prediction Settings ###
+do_sample: true
+temperature: 0.7
+top_p: 0.9
+top_k: 50
+num_beams: 1
+max_new_tokens: 1024
+repetition_penalty: 1.1
+
+### Special Tokens ###
+additional_special_tokens: []
