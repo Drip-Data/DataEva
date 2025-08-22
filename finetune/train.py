@@ -66,12 +66,21 @@ class RewardModelTrainer:
         """Setup SwanLab monitoring"""
         if SWANLAB_AVAILABLE and self.config.get('experiment_name'):
             try:
+                # Disable GPU monitoring to avoid cleanup issues
+                import os
+                os.environ['SWANLAB_DISABLE_GPU_MONITOR'] = '1'
+                
                 swanlab.init(
                     project=self.config.get('experiment_name', 'reward_model_training'),
                     experiment_name=self.config.get('run_name', 'process_reward_model_v1'),
-                    config=self.config
+                    config=self.config,
+                    # Additional parameters to prevent GPU monitoring issues
+                    settings={
+                        'hardware_monitor': False,  # Disable hardware monitoring
+                        'gpu_monitor': False,       # Explicitly disable GPU monitoring
+                    } if hasattr(swanlab, 'init') else {}
                 )
-                print("✓ SwanLab monitoring initialized")
+                print("✓ SwanLab monitoring initialized (GPU monitoring disabled)")
                 return True
             except Exception as e:
                 print(f"Warning: Failed to initialize SwanLab: {e}")
