@@ -276,28 +276,10 @@ class DatasetConverter:
                 files = self.save_dataset(model_converted, filename)
                 datasets[f"reward_model_{safe_model_name}"] = files
         
-        # 6. Task-specific variants (example for each unique task)
-        unique_tasks = set()
-        for entry in data:
-            task_id = entry.get('metadata', {}).get('task_id', '')
-            if task_id:
-                unique_tasks.add(task_id)
-        
-        for task in unique_tasks:
-            task_data = self.filter_by_metadata(data, task_ids=[task])
-            if task_data:
-                # Only split if user requested AND we have enough samples
-                should_split = split_eval and len(task_data) >= min_samples
-                task_converted = self.convert_to_llamafactory_format(
-                    task_data, 
-                    split_eval=should_split, 
-                    eval_ratio=eval_ratio,
-                    min_samples_for_split=min_samples
-                )
-                safe_task_name = task.replace('-', '_').replace('.', '_')
-                filename = f"reward_model_{safe_task_name}.json"
-                files = self.save_dataset(task_converted, filename)
-                datasets[f"reward_model_{safe_task_name}"] = files
+        # 6. Task-specific variants - REMOVED
+        # Individual task datasets are not needed and create too many files
+        # Users can create custom task-specific datasets using:
+        # python convert_dataset.py --task-ids specific_task_name
         
         # Generate dataset configuration
         self.generate_dataset_configs(datasets)
